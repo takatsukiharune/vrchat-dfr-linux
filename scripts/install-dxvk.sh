@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Replace a (possibly read-only) DLL without touching its permissions: write a
+# temp file beside it, copy the original's mode, and rename it into place.
+replace_dll() {
+  local src="$1" dst="$2" tmp
+  tmp="$(mktemp "$dst.XXXXXX")"
+  if ! { cp "$src" "$tmp" && chmod --reference="$dst" "$tmp" && mv -f "$tmp" "$dst"; }; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 dxvk_from="${DXVK_FROM:-${DXVK_OUTPUT_DIR:-}}"
@@ -84,7 +95,7 @@ fi
 }
 
 tmp_extract=""
-cleanup() { [[ -n "$tmp_extract" && -d "$tmp_extract" ]] && rm -rf "$tmp_extract"; }
+cleanup() { if [[ -n "$tmp_extract" && -d "$tmp_extract" ]]; then rm -rf "$tmp_extract"; fi; }
 trap cleanup EXIT
 
 # If source is a .zip, extract and locate the folder containing both DLLs.
@@ -131,7 +142,7 @@ target="$proton_dir/files/lib/wine/dxvk/x86_64-windows"
 mkdir -p "$backup_dir"
 cp -a "$target/d3d11.dll" "$backup_dir/d3d11.dll"
 cp -a "$target/dxgi.dll" "$backup_dir/dxgi.dll"
-cp "$dxvk_from/d3d11.dll" "$target/d3d11.dll"
-cp "$dxvk_from/dxgi.dll" "$target/dxgi.dll"
+replace_dll "$dxvk_from/d3d11.dll" "$target/d3d11.dll"
+replace_dll "$dxvk_from/dxgi.dll" "$target/dxgi.dll"
 printf '%s\n' "Installed patched DXVK into $target" "Backup: $backup_dir"
 printf '%s\n' "Note: updating/reinstalling Proton may replace these files."
