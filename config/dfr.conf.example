@@ -1,0 +1,24 @@
+# Live settings for the DXVK gaze-VRS patch.
+# Copy to ~/.config/vrchat-dfr/dfr.conf (or let `dfrctl set ...` create it) and
+# point the game at it:  DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=/home/you/.config/vrchat-dfr/dfr.conf %command%
+# The file is re-read while the game runs. Anything not set here falls back to
+# the DXVK_GAZE_* launch options, then to the built-in defaults.
+# `dfrctl keys` lists every setting.
+
+# VRChat's scene pass: Vulkan format 97 (RGBA16F), rendered upside down.
+fmt = 97
+flip_y = 1
+
+# Percent of one eye's image at full rate / at 2x2 or better; the rest is `coarse`.
+full_area = 45
+mid_area = 65
+coarse = auto
+
+# Blinks and short dropouts: keep the last gaze for this long, then render at
+# full rate (off) or foveate around the eye centre (center).
+hold_ms = 500
+fallback = off
+
+# enabled = 0      # full-rate rendering without restarting the game
+# dot = 1          # draw the gaze position to check alignment
+# debug = 1        # per-second diagnostics in the DXVK log

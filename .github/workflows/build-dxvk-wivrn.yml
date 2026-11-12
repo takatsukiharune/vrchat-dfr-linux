@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       dxvk_ref:
-        description: 'DXVK base commit/tag (patch target)'
-        required: true
-        default: 'd30be2ba'
+        description: 'DXVK base commit/tag (patch target); empty = DXVK_COMMIT from versions.env'
+        required: false
+        default: ''
         type: string
       dxvk_repo:
         description: 'DXVK repository URL'
@@ -38,8 +38,10 @@ jobs:
 
       - name: Clone DXVK
         run: |
+          source versions.env
+          ref="${{ inputs.dxvk_ref }}"
           git clone --recursive "${{ inputs.dxvk_repo || 'https://github.com/doitsujin/dxvk.git' }}" dxvk
-          git -C dxvk checkout --recurse-submodules "${{ inputs.dxvk_ref || 'd30be2ba' }}"
+          git -C dxvk checkout --recurse-submodules "${ref:-$DXVK_COMMIT}"
 
       - name: Apply DXVK patch
         run: |
@@ -118,7 +120,7 @@ jobs:
         run: |
           cd release
           zip -r dxvk-gaze-vrs.zip dxvk-gaze-vrs
-          chmod +x openxr-gaze-bridge/openxr-gaze-bridge
+          chmod +x openxr-gaze-bridge/openxr-gaze-bridge openxr-gaze-bridge/dfrctl
           zip -r openxr-gaze-bridge-linux-x86_64.zip openxr-gaze-bridge
           ls -la
 
@@ -131,7 +133,7 @@ jobs:
           body: |
             Experimental gaze-driven VRS build.
 
-            - DXVK base: `${{ inputs.dxvk_ref || 'd30be2ba' }}`
+            - DXVK base: `${{ inputs.dxvk_ref || 'DXVK_COMMIT in versions.env' }}`
             - Gaze: native Linux OpenXR headless bridge (no WiVRn export patch required)
 
             See README for install and VRChat launch configuration.

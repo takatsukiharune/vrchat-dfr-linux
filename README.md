@@ -1,7 +1,7 @@
 # WiVRn + DXVK Gaze-Driven VRS
 
-Experimental gaze-driven variable rate shading for VRChat over WiVRn(also works for any DXVK application).
-Tested on Arch with a Pico 4 Pro.
+Gaze-driven variable rate shading (dynamic foveated rendering) for VRChat over
+WiVRn. It also works for other DXVK applications.
 
 A separate native Linux process reads gaze through standard OpenXR
 (`XR_EXT_eye_gaze_interaction` with `XR_MND_headless`) and publishes per-eye
@@ -9,9 +9,28 @@ centers to `/dev/shm/vrchat_dfr_gaze`. Patched DXVK reads this shared memory
 and builds a Vulkan fragment-shading-rate attachment around the gaze point.
 WiVRn's gaze-export patch and changes to xrizer are not required.
 
-The original WiVRn-export transport was tested on the hardware above. The new
-OpenXR bridge has build and automated test coverage; live HMD / VRChat
-validation is still pending.
+## Status
+
+Meant for everyday use: when anything is missing or goes wrong (no bridge, no
+headset, tracking lost, bad setting, unsupported GPU) the game renders at full
+rate instead of misbehaving, and every setting can be changed while the game
+runs ([Live tuning](#live-tuning)).
+
+What has been checked:
+
+- Live in VRChat, with the revision before live tuning and tracking-loss
+  handling were added: an RTX 3060 Ti with a Pico 4 Pro on Arch, and RADV on
+  an RX 9070 XT (VRCMark GPU score 7538 -> 9021).
+- By the automated tests: `scripts/test-gaze-bridge.sh` (projection
+  math, shared-memory protocol, settings parser, map worker, bridge lifecycle
+  against a simulated OpenXR runtime) and `scripts/test-dxvk-e2e.sh`, which
+  runs the built DLLs under Wine on a real Vulkan driver, renders offscreen
+  and checks from the rendered pixels that the full-rate region is where the
+  gaze is, has the configured size, follows live setting changes, survives a
+  killed and restarted bridge, and produces no Vulkan validation errors.
+
+Not covered by automation: gaze-to-image alignment and latency in a real
+headset. Use `dfrctl set dot 1` to check alignment on your hardware.
 
 VRChat issues several passes of similar size, so VRS has to be restricted
 to the RGBA16F scene pass (`fmt=97`) with a Y flip - otherwise you get
@@ -19,7 +38,7 @@ multiple foveation spots. These are the tested values, not universal
 requirements.
 
 > [!WARNING]
-> Experimental, use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, WiVRn or DXVK. It replaces `d3d11.dll` and `dxgi.dll` in your Proton install, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how. Tested only on an RTX 3060 Ti with a Pico 4 Pro.  
+> Use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, WiVRn or DXVK. It replaces `d3d11.dll` and `dxgi.dll` in your Proton install, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how.  
 > I also recommend against using MSAA/Anti-Aliasing in VRChat with this, as increasing the MSAA sample count can limit the maximum VRS coarse rate available on some GPUs. For better image quality, use a higher render resolution instead.
 
 ## Install
@@ -33,6 +52,13 @@ requirements.
 Omit `--dxvk-from` to use a local build from `dist/dxvk`. The installer
 backs up the originals to `.backup/` and only touches those two files. A
 Proton update overwrites them - reinstall afterward.
+
+To go back to stock DXVK, restore the backup the installer printed:
+
+    ./scripts/uninstall-dxvk.sh .backup/dxvk-YYYYMMDD-HHMMSS
+
+Removing `DXVK_GAZE_VRS=1` from the launch options also turns everything off:
+without it the patched DLLs run none of the gaze code.
 
 **Gaze bridge** — build and run on the Linux host:
 
@@ -59,19 +85,86 @@ the polling rate, sample-age limit, output path and timed diagnostic options.
 
 ## Run VRChat
 
-    DXVK_GAZE_VRS=1 DXVK_GAZE_FMT=97 DXVK_GAZE_FLIP_Y=1 DXVK_GAZE_FULL_AREA=45 DXVK_GAZE_MID_AREA=65 DXVK_GAZE_COARSE=auto
+Recommended: keep the settings in a file, so they can be changed while the
+game runs and the launch options never need editing again.
 
-Add `DXVK_GAZE_DEBUG=1 DXVK_GAZE_DOT=1` to draw the gaze dots. See
-[`config/vrchat.env`](config/vrchat.env).
+```bash
+dfrctl set fmt 97 flip_y 1 full_area 45 mid_area 65 coarse auto   # writes ~/.config/vrchat-dfr/dfr.conf
+dfrctl launch-options                                             # prints the line for Steam
+```
+
+Steam launch options then look like this (a plain Linux path is fine):
+
+    DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=/home/you/.config/vrchat-dfr/dfr.conf %command%
+
+The old way still works and gives the same result, without live tuning:
+
+    DXVK_GAZE_VRS=1 DXVK_GAZE_FMT=97 DXVK_GAZE_FLIP_Y=1 DXVK_GAZE_FULL_AREA=45 DXVK_GAZE_MID_AREA=65 DXVK_GAZE_COARSE=auto %command%
+
+Both can be combined: the `DXVK_GAZE_*` variables are the defaults, and the
+config file overrides them key by key. See
+[`config/dfr.conf.example`](config/dfr.conf.example).
+
+## Live tuning
+
+`dfrctl` (built into `dist/gaze/`, no dependencies) edits the config file;
+DXVK notices within about a third of a second. Editing the file by hand works
+just as well.
+
+```bash
+dfrctl set full_area 35 mid_area 55   # shrink the sharp region
+dfrctl set dot 1                      # show where DXVK thinks you are looking
+dfrctl off                            # full-rate rendering, e.g. for a screenshot
+dfrctl on
+dfrctl status                         # is it actually foveating right now?
+dfrctl keys                           # every setting and its range
+```
+
+`dfrctl status` reads a small status file that DXVK writes next to the config
+once a second, and checks the bridge's heartbeat:
+
+```
+DXVK:   running
+        enabled=1
+        gaze=live
+        source=open
+        candidate_passes_per_s=180
+        foveated_passes_per_s=180
+        map_uploads_per_s=42
+        pass=4128x2208 layers=1 fmt=97 samples=1
+        coarse=2x2
+        texel=8x8
+Bridge: running, gaze L=(0.512, 0.487) R=(0.488, 0.487)
+```
+
+`foveated_passes_per_s=0` with `candidate_passes_per_s>0` means a pass was
+found but there is no usable gaze; `candidate_passes_per_s=0` means no render
+pass matches `fmt` / `samples` / `minsize`.
+
+A setting that is not valid is never applied: `dfrctl` refuses it, and a
+hand-edited file with a mistake is ignored as a whole (the previous settings
+stay in effect, the reason is in the DXVK log). `coarse` is clamped to the
+rates the GPU reports for the pass's sample count, so `4x4` on a GPU that only
+does `2x2` gives `2x2`.
+
+### Tracking loss
+
+When the gaze becomes invalid (a blink, the headset taken off, the bridge
+restarting) DXVK keeps the last gaze position for `hold_ms` (default 500), so
+blinks do not make the frame rate jump. After that it renders at full rate
+(`fallback off`, the default) or foveates around the centre of each eye
+(`fallback center`) until tracking returns. Use `hold_ms 0` for the old
+behaviour of dropping to full rate at once.
 
 Verify the shared-memory file exists while a session is up:
 
     ls -l /dev/shm/vrchat_dfr_gaze
 
 The shared format is versioned and incompatible with the old `wivrn_gaze`
-export. DXVK disables gaze VRS for invalid data or a heartbeat stopped for
-100 ms. It waits for a sequence change before accepting a newly mapped file.
-After a stale mapping is closed, reopening may take up to 2 seconds.
+export. DXVK treats invalid data, or a heartbeat stopped for 100 ms, as
+tracking loss (see above). It waits for a sequence change before accepting a
+newly mapped file. After a stale mapping is closed, reopening may take up to
+2 seconds.
 
 If Steam's container has a different `/dev/shm`, choose a directory visible
 both to the host and Proton, for example a directory under your home:
@@ -81,22 +174,31 @@ mkdir -p "$HOME/.cache/vrchat-dfr"
 ./dist/gaze/openxr-gaze-bridge --file "$HOME/.cache/vrchat-dfr/gaze" --verbose
 ```
 
-Set `DXVK_GAZE_FILE` to the corresponding **Wine path** in VRChat's launch
-options, for example `'Z:\home\reina\.cache\vrchat-dfr\gaze'`. Both processes
-must see the same file. The bridge preserves its inode across restarts; do not
+Set `DXVK_GAZE_FILE` to the same path in VRChat's launch options, either as a
+Linux path (`/home/you/.cache/vrchat-dfr/gaze`) or as a Wine path
+(`'Z:\home\you\.cache\vrchat-dfr\gaze'`). Both processes must see the same
+file. The bridge preserves its inode across restarts; do not
 remove or truncate it while a reader is running.
 
-## Env vars
+## Settings
+
+Every row except the first two and `DXVK_GAZE_FILE` can also be set in the
+config file, under the name without `DXVK_GAZE_` in lower case (`full_area`,
+`flip_y`, ...), and changed while the game runs.
 
 | Variable | Purpose |
 |---|---|
-| `DXVK_GAZE_VRS=1` | Enable gaze VRS |
+| `DXVK_GAZE_VRS=1` | Master switch, read once at start-up. Without it no gaze code runs |
+| `DXVK_GAZE_CONFIG` | Config file to watch (Linux or Wine path). Also enables the status file |
+| `enabled` (config file only) | `0` renders at full rate until set back to `1` |
+| `DXVK_GAZE_HOLD_MS` | Keep the last gaze this long on tracking loss (default 500) |
+| `DXVK_GAZE_FALLBACK` | After the hold: `off` = full rate (default), `center` = foveate around the eye centre |
 | `DXVK_GAZE_FMT=97` | Restrict to the RGBA16F scene pass |
 | `DXVK_GAZE_FLIP_Y=1` | Flip scene-pass Y |
 | `DXVK_GAZE_FULL_AREA` | Percent of the eye image that renders at full rate |
 | `DXVK_GAZE_MID_AREA` | Percent rendered at full or 2×2; beyond it uses `COARSE` |
 | `DXVK_GAZE_R1` / `R2` | Inner / outer radius of the sharp region |
-| `DXVK_GAZE_COARSE` | Outer shading-rate code (`auto` = Highest available for your system), you may also enter an int |
+| `DXVK_GAZE_COARSE` | Outer shading rate: `auto` (coarsest the GPU supports), `2x2`, `4x4`, ... or a raw rate code. Clamped to what the GPU supports |
 | `DXVK_GAZE_DEBUG=1` | Pass/gaze diagnostics |
 | `DXVK_GAZE_DOT=1` | Draw dots at the gaze position used by the displayed VRS image, including upload latency (SBS only) |
 | `DXVK_GAZE_SWAP_EYES=1` | Swap per-eye gaze data |
@@ -104,7 +206,7 @@ remove or truncate it while a reader is running.
 | `DXVK_GAZE_FLIPX_L/R`, `FLIPY_L/R` | Force per-eye X/Y flip |
 | `DXVK_GAZE_FAKE=x/y/circle/fixed/grid` | Synthetic gaze modes |
 | `DXVK_GAZE_SIZE=WxH`, `SAMPLES` | Force size / sample count |
-| `DXVK_GAZE_FILE` | Override the gaze file path |
+| `DXVK_GAZE_FILE` | Override the gaze file path (Linux or Wine path), read once at start-up |
 
 For a debug run with `PROTON_LOG=1`:
 
@@ -130,9 +232,23 @@ untouched and reports an error.
 ```bash
 bash scripts/setup-dev.sh
 bash scripts/build-dxvk.sh         # dist/dxvk/{d3d11,dxgi}.dll
-bash scripts/build-openxr-bridge.sh # dist/gaze/openxr-gaze-bridge
-bash scripts/test-gaze-bridge.sh    # projection, IPC, map worker and simulated OpenXR tests
+bash scripts/build-openxr-bridge.sh # dist/gaze/{openxr-gaze-bridge,dfrctl}
+bash scripts/test-gaze-bridge.sh    # projection, IPC, settings, map worker and simulated OpenXR tests
+bash scripts/test-dxvk-e2e.sh       # the built DLLs under Wine on a real GPU, with validation layers
 ```
+
+Or do all of it in a container, without installing anything on the host and
+without touching the host's Proton, Wine prefix or VR runtime (the repository
+is the only directory mounted; the GPU render node is passed through so the
+end-to-end test can render offscreen):
+
+```bash
+bash scripts/dev-container.sh all   # build + every test; results land in dist/
+bash scripts/dev-container.sh rm    # delete the container and image again
+```
+
+The end-to-end test needs a Vulkan driver with `VK_KHR_fragment_shading_rate`
+(Mesa's software driver has none) and uses its own throwaway Wine prefix.
 
 `DXVK_SOURCE_DIR`, `DXVK_OUTPUT_DIR` and `DXVK_BUILD_JOBS` override the DXVK
 source path, output path and parallel job count (default 4). `CXX` and
@@ -178,9 +294,12 @@ OpenVR / existing-session route and its unresolved integration questions.
 
 - The DXVK patch now uses the OpenXR bridge protocol. The WiVRn patch is retained
   for historical reference only.
-- Everything here is experimental; `fmt=97` and `FLIP_Y=1` are just the
-  values that worked for this test.
-- Revisions: DXVK `d30be2ba`, WiVRn `v26.9` / `bbc6e4c` (see
+- `fmt=97` and `FLIP_Y=1` are the values that work for VRChat; other
+  applications need their own (`dfrctl set debug 1` lists the passes in the
+  DXVK log).
+- A sample systemd user unit for the bridge is in
+  [`contrib/openxr-gaze-bridge.service`](contrib/openxr-gaze-bridge.service).
+- Revisions: DXVK `0cfe0898`, WiVRn `v26.9` / `bbc6e4c` (see
   `versions.env`). The DXVK patch records its parent blob hashes, so the
   DXVK ref must match exactly.
 

@@ -258,6 +258,353 @@ index 00000000..f5407168
 +    }
 +  };
 +}
+diff --git a/src/dxvk/dxvk_gaze_config.h b/src/dxvk/dxvk_gaze_config.h
+new file mode 100644
+index 00000000..12a7f2bc
+--- /dev/null
++++ b/src/dxvk/dxvk_gaze_config.h
+@@ -0,0 +1,341 @@
++#pragma once
++
++#include <algorithm>
++#include <cctype>
++#include <cmath>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <string>
++#include <vector>
++
++// Gaze VRS tunables. Pure C++ so the native test harness can build it.
++// Start-up values come from DXVK_GAZE_* environment variables; an optional
++// config file (DXVK_GAZE_CONFIG) overrides them and is re-read while running.
++namespace dxvk
++{
++  enum class GazeFake : uint32_t { None, X, Y, Circle, Fixed, Grid };
++  enum class GazeFallback : uint32_t { Off, Center };
++
++  struct GazeConfig
++  {
++    bool enabled = true;
++    float r1 = 0.20f, r2 = 0.40f;
++    float fullArea = -1.0f, midArea = -1.0f;
++    uint32_t coarse = 5u; // raw rate code, (log2(w) << 2) | log2(h)
++    bool autoCoarse = false;
++    uint32_t minSize = 700u;
++    uint32_t onlySamples = 0u, onlyFormat = 0u;
++    uint32_t forceW = 0u, forceH = 0u;
++    bool debug = false, dot = false;
++    int32_t dotRadius = 24;
++    bool flipY = false, swapEyes = false;
++    int32_t forceFlipX[2] = {-1, -1}, forceFlipY[2] = {-1, -1};
++    float gainY = 1.0f, fixedY = 0.25f;
++    GazeFake fake = GazeFake::None;
++    // Tracking loss (blinks, bridge restart): keep the last gaze this long,
++    // then either render at full rate or foveate around the eye centre.
++    uint32_t holdMs = 500u;
++    GazeFallback fallback = GazeFallback::Off;
++
++    static std::string trim(const std::string &s)
++    {
++      size_t a = 0u, b = s.size();
++      while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) a++;
++      while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1u]))) b--;
++      return s.substr(a, b - a);
++    }
++
++    static std::string lower(std::string s)
++    {
++      for (auto &c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
++      return s;
++    }
++
++    // "DXVK_GAZE_FULL_AREA", "full_area" and "Full-Area" all name one key.
++    static std::string normalizeKey(const std::string &raw)
++    {
++      std::string key = lower(trim(raw));
++      std::replace(key.begin(), key.end(), '-', '_');
++      if (key.rfind("dxvk_gaze_", 0u) == 0u) key.erase(0u, 10u);
++      return key;
++    }
++
++    static bool parseNumber(const std::string &value, double lo, double hi, double &out)
++    {
++      if (value.empty()) return false;
++      char *end = nullptr;
++      const double parsed = std::strtod(value.c_str(), &end);
++      if (end == value.c_str() || *end || !std::isfinite(parsed) || parsed < lo || parsed > hi)
++        return false;
++      out = parsed;
++      return true;
++    }
++
++    static bool parseBool(const std::string &value, bool &out)
++    {
++      const std::string v = lower(value);
++      if (v == "1" || v == "true" || v == "on" || v == "yes") { out = true; return true; }
++      if (v == "0" || v == "false" || v == "off" || v == "no") { out = false; return true; }
++      return false;
++    }
++
++    static bool validRateCode(uint32_t code)
++    {
++      return code < 16u && (code & 3u) <= 2u && (code >> 2u) <= 2u;
++    }
++
++    // Returns false for an unknown key or a value that is not acceptable.
++    // A rejected value leaves the setting untouched.
++    bool set(const std::string &rawKey, const std::string &rawValue)
++    {
++      const std::string key = normalizeKey(rawKey);
++      const std::string value = trim(rawValue);
++      double n = 0.0;
++      bool b = false;
++      auto number = [&](double lo, double hi) { return parseNumber(value, lo, hi, n); };
++      auto tri = [&](int32_t &out) {
++        if (value.empty() || lower(value) == "auto" || value == "-1") { out = -1; return true; }
++        if (!parseBool(value, b)) return false;
++        out = b ? 1 : 0;
++        return true;
++      };
++
++      if (key == "enabled" || key == "vrs") { if (!parseBool(value, b)) return false; enabled = b; }
++      else if (key == "r1") { if (!number(0.0, 10.0)) return false; r1 = float(n); }
++      else if (key == "r2") { if (!number(0.0, 10.0)) return false; r2 = float(n); }
++      else if (key == "full_area") { if (!number(-1.0, 100.0)) return false; fullArea = n < 0.0 ? -1.0f : float(n); }
++      else if (key == "mid_area") { if (!number(-1.0, 100.0)) return false; midArea = n < 0.0 ? -1.0f : float(n); }
++      else if (key == "coarse" || key == "maxrate")
++      {
++        const std::string v = lower(value);
++        unsigned w = 0u, h = 0u;
++        char tail = 0;
++        if (v == "auto") { autoCoarse = true; }
++        else if (std::sscanf(v.c_str(), "%ux%u%c", &w, &h, &tail) == 2)
++        {
++          if ((w != 1u && w != 2u && w != 4u) || (h != 1u && h != 2u && h != 4u)) return false;
++          coarse = ((w >> 1u) << 2u) | (h >> 1u);
++          autoCoarse = false;
++        }
++        else
++        {
++          if (!number(0.0, 15.0) || n != std::floor(n) || !validRateCode(uint32_t(n))) return false;
++          coarse = uint32_t(n);
++          autoCoarse = false;
++        }
++      }
++      else if (key == "minsize") { if (!number(1.0, 65536.0)) return false; minSize = uint32_t(n); }
++      else if (key == "samples") { if (!number(0.0, 64.0)) return false; onlySamples = uint32_t(n); }
++      else if (key == "fmt") { if (!number(0.0, 4294967295.0)) return false; onlyFormat = uint32_t(n); }
++      else if (key == "size")
++      {
++        unsigned w = 0u, h = 0u;
++        char tail = 0;
++        if (value.empty() || value == "0") { forceW = forceH = 0u; }
++        else if (std::sscanf(value.c_str(), "%ux%u%c", &w, &h, &tail) == 2 && w && h) { forceW = w; forceH = h; }
++        else return false;
++      }
++      else if (key == "debug") { if (!parseBool(value, b)) return false; debug = b; }
++      else if (key == "dot") { if (!parseBool(value, b)) return false; dot = b; }
++      else if (key == "dot_radius") { if (!number(1.0, 512.0)) return false; dotRadius = int32_t(n); }
++      else if (key == "flip_y") { if (!parseBool(value, b)) return false; flipY = b; }
++      else if (key == "swap_eyes") { if (!parseBool(value, b)) return false; swapEyes = b; }
++      else if (key == "gain_y") { if (!number(0.0, 10.0)) return false; gainY = float(n); }
++      else if (key == "fixed_y") { if (!number(0.0, 1.0)) return false; fixedY = float(n); }
++      else if (key == "flipx_l") return tri(forceFlipX[0]);
++      else if (key == "flipx_r") return tri(forceFlipX[1]);
++      else if (key == "flipy_l") return tri(forceFlipY[0]);
++      else if (key == "flipy_r") return tri(forceFlipY[1]);
++      else if (key == "fake")
++      {
++        const std::string v = lower(value);
++        if (v.empty() || v == "0" || v == "none" || v == "off") fake = GazeFake::None;
++        else if (v == "x") fake = GazeFake::X;
++        else if (v == "y") fake = GazeFake::Y;
++        else if (v == "circle") fake = GazeFake::Circle;
++        else if (v == "fixed") fake = GazeFake::Fixed;
++        else if (v == "grid") fake = GazeFake::Grid;
++        else return false;
++      }
++      else if (key == "hold_ms") { if (!number(0.0, 10000.0)) return false; holdMs = uint32_t(n); }
++      else if (key == "fallback")
++      {
++        const std::string v = lower(value);
++        if (v.empty() || v == "0" || v == "off" || v == "none") fallback = GazeFallback::Off;
++        else if (v == "center" || v == "centre") fallback = GazeFallback::Center;
++        else return false;
++      }
++      // Read once at start-up by their owners; accepted so that one file can
++      // hold a whole launch configuration.
++      else if (key == "file" || key == "config") { }
++      else return false;
++      return true;
++    }
++
++    // Keep the zones nested whatever order the settings were given in.
++    void sanitize()
++    {
++      if (fullArea >= 0.0f && midArea >= 0.0f) midArea = std::max(midArea, fullArea);
++      if (fullArea < 0.0f && midArea < 0.0f) r2 = std::max(r1, r2);
++    }
++
++    bool operator==(const GazeConfig &o) const
++    {
++      return enabled == o.enabled && r1 == o.r1 && r2 == o.r2
++          && fullArea == o.fullArea && midArea == o.midArea
++          && coarse == o.coarse && autoCoarse == o.autoCoarse && minSize == o.minSize
++          && onlySamples == o.onlySamples && onlyFormat == o.onlyFormat
++          && forceW == o.forceW && forceH == o.forceH && debug == o.debug && dot == o.dot
++          && dotRadius == o.dotRadius && flipY == o.flipY && swapEyes == o.swapEyes
++          && forceFlipX[0] == o.forceFlipX[0] && forceFlipX[1] == o.forceFlipX[1]
++          && forceFlipY[0] == o.forceFlipY[0] && forceFlipY[1] == o.forceFlipY[1]
++          && gainY == o.gainY && fixedY == o.fixedY && fake == o.fake
++          && holdMs == o.holdMs && fallback == o.fallback;
++    }
++    bool operator!=(const GazeConfig &o) const { return !(*this == o); }
++
++    std::string describe() const
++    {
++      static const char *const fakes[] = {"none", "x", "y", "circle", "fixed", "grid"};
++      char text[512];
++      std::snprintf(text, sizeof(text),
++          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u fmt=%u samples=%u"
++          " minsize=%u size=%ux%u flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
++          " fallback=%s dot=%d debug=%d",
++          int(enabled), double(fullArea), double(midArea), double(r1), double(r2),
++          autoCoarse ? "auto/" : "", coarse, onlyFormat, onlySamples, minSize, forceW, forceH,
++          int(flipY), int(swapEyes), double(gainY), fakes[uint32_t(fake)], holdMs,
++          fallback == GazeFallback::Center ? "center" : "off", int(dot), int(debug));
++      return text;
++    }
++  };
++
++  // Every key that can also be given as a DXVK_GAZE_<KEY> environment variable.
++  inline const std::vector<std::string> &gazeConfigEnvKeys()
++  {
++    static const std::vector<std::string> keys = {
++        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MINSIZE", "SAMPLES", "FMT",
++        "SIZE", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
++        "FLIPX_L", "FLIPX_R", "FLIPY_L", "FLIPY_R", "FAKE", "HOLD_MS", "FALLBACK"};
++    return keys;
++  }
++
++  // getenv(name) returns the value, or an empty string when it is not set.
++  template<typename Getenv>
++  GazeConfig gazeConfigFromEnv(Getenv &&getenv, std::vector<std::string> &errors)
++  {
++    GazeConfig config;
++    for (const auto &key : gazeConfigEnvKeys())
++    {
++      const std::string name = "DXVK_GAZE_" + key;
++      const std::string value = getenv(name.c_str());
++      if (!value.empty() && !config.set(key, value))
++        errors.push_back(name + "=" + value + " is not valid, ignored");
++    }
++    config.sanitize();
++    return config;
++  }
++
++  // "key = value" lines; '#' starts a comment. Returns false and leaves config
++  // untouched if any line is wrong, so a typo never applies half a file.
++  inline bool parseGazeConfigText(const std::string &text, GazeConfig &config,
++      std::vector<std::string> &errors)
++  {
++    GazeConfig parsed = config;
++    bool ok = true;
++    size_t pos = 0u;
++    uint32_t lineNumber = 0u;
++    while (pos <= text.size())
++    {
++      size_t end = text.find('\n', pos);
++      if (end == std::string::npos) end = text.size();
++      std::string line = text.substr(pos, end - pos);
++      pos = end + 1u;
++      lineNumber++;
++      const size_t comment = line.find('#');
++      if (comment != std::string::npos) line.erase(comment);
++      line = GazeConfig::trim(line);
++      if (line.empty()) continue;
++      const size_t eq = line.find('=');
++      std::string value = eq == std::string::npos ? "" : GazeConfig::trim(line.substr(eq + 1u));
++      if (value.size() >= 2u && (value.front() == '"' || value.front() == '\'')
++          && value.back() == value.front())
++        value = value.substr(1u, value.size() - 2u);
++      if (eq == std::string::npos || !parsed.set(line.substr(0u, eq), value))
++      {
++        errors.push_back("line " + std::to_string(lineNumber) + ": cannot use '" + line + "'");
++        ok = false;
++      }
++    }
++    if (!ok) return false;
++    parsed.sanitize();
++    config = parsed;
++    return true;
++  }
++
++  // Polls the config file by content. A missing file means "environment
++  // values only"; a file with errors keeps whatever was in effect before.
++  class GazeConfigFile
++  {
++  public:
++    GazeConfigFile() = default;
++    GazeConfigFile(std::string path, const GazeConfig &base)
++    : m_path(std::move(path)), m_base(base), m_current(base) { }
++
++    const GazeConfig &config() const { return m_current; }
++    const std::string &path() const { return m_path; }
++
++    // Returns true when the effective configuration changed. messages gets
++    // one-off notes worth logging (file appeared, went away, was rejected).
++    bool reload(std::vector<std::string> &messages)
++    {
++      if (m_path.empty()) return false;
++      std::string text;
++      const bool exists = read(text);
++      if (m_seen && exists == m_exists && text == m_text) return false;
++      const bool first = !m_seen;
++      m_seen = true;
++      m_exists = exists;
++      m_text = text;
++
++      GazeConfig next = m_base;
++      if (!exists)
++      {
++        messages.push_back(first ? "config file not found, using environment values: " + m_path
++                                 : "config file removed, back to environment values");
++      }
++      else
++      {
++        std::vector<std::string> errors;
++        if (!parseGazeConfigText(text, next, errors))
++        {
++          for (const auto &e : errors) messages.push_back("config " + e);
++          messages.push_back("config file rejected, keeping previous settings");
++          return false;
++        }
++      }
++      if (next == m_current) return false;
++      m_current = next;
++      return true;
++    }
++
++  private:
++    std::string m_path, m_text;
++    GazeConfig m_base, m_current;
++    bool m_seen = false, m_exists = false;
++
++    bool read(std::string &text) const
++    {
++      std::FILE *file = std::fopen(m_path.c_str(), "rb");
++      if (!file) return false;
++      char buffer[4096];
++      size_t n;
++      // Settings are a few hundred bytes; refuse to slurp anything huge.
++      while (text.size() <= 65536u && (n = std::fread(buffer, 1u, sizeof(buffer), file)) > 0u)
++        text.append(buffer, n);
++      std::fclose(file);
++      return true;
++    }
++  };
++}
 diff --git a/src/dxvk/dxvk_gaze_dot.h b/src/dxvk/dxvk_gaze_dot.h
 new file mode 100644
 index 00000000..71ccea17
@@ -578,10 +925,10 @@ index 00000000..5154df19
 +} // namespace gaze_bridge
 diff --git a/src/dxvk/dxvk_gaze_source.cpp b/src/dxvk/dxvk_gaze_source.cpp
 new file mode 100644
-index 00000000..9a2806ae
+index 00000000..713a0b4f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.cpp
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,281 @@
 +#include "dxvk_gaze_source.h"
 +#include "../util/log/log.h"
 +#include "../util/util_env.h"
@@ -594,37 +941,9 @@ index 00000000..9a2806ae
 +
 +namespace dxvk
 +{
-+  static float getEnvFloat(const char *name, float fallback)
++  DxvkGazeSource::DxvkGazeSource(std::string path, const GazeConfig &config)
++  : m_config(config), m_path(std::move(path))
 +  {
-+    std::string v = env::getEnvVar(name);
-+    return v.empty() ? fallback : float(std::atof(v.c_str()));
-+  }
-+
-+  // -1 = unset, 0 / 1 = forced
-+  static int getEnvTri(const char *name)
-+  {
-+    std::string v = env::getEnvVar(name);
-+    if (v.empty())
-+      return -1;
-+    return v == "1" ? 1 : 0;
-+  }
-+
-+  DxvkGazeSource::DxvkGazeSource()
-+  {
-+    m_debug = env::getEnvVar("DXVK_GAZE_DEBUG") == "1";
-+    m_flipY = env::getEnvVar("DXVK_GAZE_FLIP_Y") == "1";
-+    m_swapEyes = env::getEnvVar("DXVK_GAZE_SWAP_EYES") == "1";
-+    m_gainY = getEnvFloat("DXVK_GAZE_GAIN_Y", 1.0f);
-+    m_path = env::getEnvVar("DXVK_GAZE_FILE");
-+    if (m_path.empty()) m_path = "Z:\\dev\\shm\\vrchat_dfr_gaze";
-+    std::string fake = env::getEnvVar("DXVK_GAZE_FAKE");
-+    m_fake = fake == "x" ? 1 : fake == "y" ? 2 : fake == "circle" ? 3
-+        : fake == "fixed" ? 4 : fake == "grid" ? 5 : 0;
-+    m_fixedY = getEnvFloat("DXVK_GAZE_FIXED_Y", 0.25f);
-+    m_forceFlipX[0] = getEnvTri("DXVK_GAZE_FLIPX_L");
-+    m_forceFlipX[1] = getEnvTri("DXVK_GAZE_FLIPX_R");
-+    m_forceFlipY[0] = getEnvTri("DXVK_GAZE_FLIPY_L");
-+    m_forceFlipY[1] = getEnvTri("DXVK_GAZE_FLIPY_R");
 +  }
 +
 +  DxvkGazeSource::~DxvkGazeSource()
@@ -677,7 +996,10 @@ index 00000000..9a2806ae
 +    m_shm = static_cast<const GazeShm *>(view);
 +    m_sourceFreshness = gaze_bridge::Freshness{};
 +
-+    Logger::info("GazeVRS: gaze source opened");
++    // A file left behind by a stopped bridge is reopened every two seconds.
++    if (!m_loggedOpen)
++      Logger::info(str::format("GazeVRS: gaze source opened: ", m_path));
++    m_loggedOpen = true;
 +#endif
 +  }
 +
@@ -733,47 +1055,76 @@ index 00000000..9a2806ae
 +    const uint32_t tilesY = (height + texelHeight - 1u) / texelHeight;
 +    Gaze g = {};
 +
-+    if (m_fake)
++    const GazeConfig &cfg = m_config;
++    const State previous = m_state;
++
++    // Nothing to build for the start-up request or while switched off.
++    if (!width || !height || !cfg.enabled)
++      return false;
++
++    if (cfg.fake != GazeFake::None)
 +    {
 +      float t = std::chrono::duration<float>(now.time_since_epoch()).count();
 +      float a = 0.35f * std::sin(t * 6.2831853f / 6.0f);
 +      float b = 0.35f * std::cos(t * 6.2831853f / 6.0f);
 +      float x = 0.5f, y = 0.5f;
 +
-+      if (m_fake == 1)
++      if (cfg.fake == GazeFake::X)
 +        x += a;
-+      else if (m_fake == 2)
++      else if (cfg.fake == GazeFake::Y)
 +        y += a;
-+      else if (m_fake == 4)
-+        y = m_fixedY; // fixed spot, no motion
-+      else if (m_fake == 5)
-+      {
-+      } // grid: fixed center
-+      else
++      else if (cfg.fake == GazeFake::Fixed)
++        y = cfg.fixedY; // fixed spot, no motion
++      else if (cfg.fake == GazeFake::Circle)
 +      {
 +        x += a;
 +        y += b;
-+      }
++      } // grid: fixed center
 +
 +      for (uint32_t e = 0; e < 2u; e++)
 +      {
 +        g.cx[e] = x;
 +        g.cy[e] = y;
 +      }
++      m_state = State::Fake;
 +    }
-+    else if (!readGaze(g))
++    else if (readGaze(g))
 +    {
-+      if (m_debug && !m_loggedNoGaze)
-+      {
-+        m_loggedNoGaze = true;
-+        Logger::info("GazeVRS: candidate pass but no valid gaze data");
-+      }
++      m_heldGaze = g;
++      m_heldTime = now;
++      m_haveHeld = true;
++      m_state = State::Live;
++    }
++    else if (m_haveHeld && now - m_heldTime < std::chrono::milliseconds(cfg.holdMs))
++    {
++      // Blink or short dropout: the eye has not gone anywhere useful yet.
++      g = m_heldGaze;
++      m_state = State::Held;
++    }
++    else if (cfg.fallback == GazeFallback::Center)
++    {
++      for (uint32_t e = 0; e < 2u; e++)
++        g.cx[e] = g.cy[e] = 0.5f;
++      m_haveHeld = false;
++      m_state = State::Fallback;
++    }
++    else
++    {
++      if (m_state != State::None)
++        Logger::info("GazeVRS: no valid gaze data, rendering at full rate");
++      m_haveHeld = false;
++      m_state = State::None;
 +      if (!m_lastValid) return false;
 +      m_lastValid = false;
 +      result.valid = false;
 +      result.request = pass;
 +      return true;
 +    }
++
++    if (previous == State::None && m_state != State::Fake)
++      Logger::info(m_state == State::Fallback
++          ? "GazeVRS: no gaze data, foveating around the eye centre"
++          : "GazeVRS: gaze tracking active");
 +
 +    for (uint32_t e = 0; e < 2u; e++)
 +    {
@@ -783,13 +1134,13 @@ index 00000000..9a2806ae
 +      m_winMaxX[e] = std::max(m_winMaxX[e], g.cx[e]);
 +    }
 +
-+    if (m_gainY != 1.0f)
++    if (cfg.gainY != 1.0f)
 +    {
 +      for (uint32_t e = 0; e < 2u; e++)
-+        g.cy[e] = std::clamp(0.5f + (g.cy[e] - 0.5f) * m_gainY, 0.0f, 1.0f);
++        g.cy[e] = std::clamp(0.5f + (g.cy[e] - 0.5f) * cfg.gainY, 0.0f, 1.0f);
 +    }
 +
-+    if (m_swapEyes)
++    if (cfg.swapEyes)
 +    {
 +      std::swap(g.cx[0], g.cx[1]);
 +      std::swap(g.cy[0], g.cy[1]);
@@ -804,10 +1155,10 @@ index 00000000..9a2806ae
 +
 +    for (uint32_t e = 0; e < 2u; e++)
 +    {
-+      bool flipX = m_forceFlipX[e] >= 0 ? m_forceFlipX[e] != 0 : g.flipX[e] != 0;
-+      bool flipY = m_forceFlipY[e] >= 0 ? m_forceFlipY[e] != 0 : g.flipY[e] != 0;
++      bool flipX = cfg.forceFlipX[e] >= 0 ? cfg.forceFlipX[e] != 0 : g.flipX[e] != 0;
++      bool flipY = cfg.forceFlipY[e] >= 0 ? cfg.forceFlipY[e] != 0 : g.flipY[e] != 0;
 +
-+      if (m_flipY)
++      if (cfg.flipY)
 +        flipY = !flipY;
 +
 +      fx[e] = flipX ? 1.0f - g.cx[e] : g.cx[e];
@@ -827,17 +1178,17 @@ index 00000000..9a2806ae
 +        center[0] / int32_t(texelWidth), center[1] / int32_t(texelHeight),
 +        center[2] / int32_t(texelWidth), center[3] / int32_t(texelHeight)};
 +
-+    if (m_debug && now >= m_nextGazeLog)
++    if (cfg.debug && now >= m_nextGazeLog)
 +    {
 +      m_nextGazeLog = now + std::chrono::seconds(1);
 +      Logger::info(str::format("GazeVRS: ", sbs ? "sbs " : "array ", width, "x", height,
 +                               " display L(", g.cx[0], ",", g.cy[0], ") R(", g.cx[1], ",", g.cy[1], ")",
-+                               " wivrn flipX=", g.flipX[0], g.flipX[1], " flipY=", g.flipY[0], g.flipY[1],
++                               " source flipX=", g.flipX[0], g.flipX[1], " flipY=", g.flipY[0], g.flipY[1],
 +                               " -> fb L(", fx[0], ",", fy[0], ") R(", fx[1], ",", fy[1], ")",
 +                               " tiles ", tilesX, "x", tilesY));
 +      Logger::info(str::format("GazeVRS: raw range last 1s: cx L[", m_winMinX[0], ",", m_winMaxX[0],
 +                               "] R[", m_winMinX[1], ",", m_winMaxX[1], "]  cy L[", m_winMin[0], ",", m_winMax[0],
-+                               "] R[", m_winMin[1], ",", m_winMax[1], "]  gainY=", m_gainY));
++                               "] R[", m_winMin[1], ",", m_winMax[1], "]  gainY=", cfg.gainY));
 +
 +      for (uint32_t e = 0; e < 2u; e++)
 +      {
@@ -861,12 +1212,13 @@ index 00000000..9a2806ae
 +}
 diff --git a/src/dxvk/dxvk_gaze_source.h b/src/dxvk/dxvk_gaze_source.h
 new file mode 100644
-index 00000000..8d6442da
+index 00000000..9bccf78f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.h
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,56 @@
 +#pragma once
 +
++#include "dxvk_gaze_config.h"
 +#include "dxvk_gaze_map.h"
 +#include "dxvk_gaze_shm.h"
 +#include <chrono>
@@ -879,11 +1231,18 @@ index 00000000..8d6442da
 +  class DxvkGazeSource
 +  {
 +  public:
-+    DxvkGazeSource();
++    // What the last generate() call based its gaze on.
++    enum class State : uint32_t { None, Live, Held, Fallback, Fake };
++
++    explicit DxvkGazeSource(std::string path, const GazeConfig &config = {});
 +    ~DxvkGazeSource();
 +    DxvkGazeSource(const DxvkGazeSource &) = delete;
 +    DxvkGazeSource &operator=(const DxvkGazeSource &) = delete;
 +    bool generate(const GazeMapRequest &pass, GazeMap &result);
++    // Worker thread only, like generate().
++    void setConfig(const GazeConfig &config) { m_config = config; }
++    State state() const { return m_state; }
++    bool sourceOpen() const { return m_shm != nullptr; }
 +
 +  private:
 +    using GazeShm = gaze_bridge::SharedGaze;
@@ -896,12 +1255,14 @@ index 00000000..8d6442da
 +    const GazeShm *m_shm = nullptr;
 +    std::chrono::steady_clock::time_point m_nextOpen = {};
 +    gaze_bridge::Freshness m_sourceFreshness;
-+    bool m_debug = false, m_flipY = false, m_swapEyes = false;
-+    int m_forceFlipX[2] = {-1, -1}, m_forceFlipY[2] = {-1, -1};
-+    float m_gainY = 1.0f, m_fixedY = 0.25f;
-+    int m_fake = 0;
++    GazeConfig m_config;
 +    std::string m_path;
-+    bool m_loggedNoGaze = false, m_lastValid = false;
++    State m_state = State::None;
++    bool m_loggedOpen = false, m_lastValid = false;
++    // Last live sample, reused for hold_ms across blinks and bridge restarts.
++    Gaze m_heldGaze;
++    bool m_haveHeld = false;
++    std::chrono::steady_clock::time_point m_heldTime = {};
 +    GazeMapRequest m_lastRequest;
 +    float m_winMin[2] = {1.0f, 1.0f}, m_winMax[2] = {0.0f, 0.0f};
 +    float m_winMinX[2] = {1.0f, 1.0f}, m_winMaxX[2] = {0.0f, 0.0f};
@@ -913,11 +1274,12 @@ index 00000000..8d6442da
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 00000000..b06cdd03
+index 00000000..b83e6558
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
-@@ -0,0 +1,565 @@
+@@ -0,0 +1,712 @@
 +#include <algorithm>
++#include <atomic>
 +#include <cstdio>
 +#include <cstdlib>
 +#include <vector>
@@ -935,28 +1297,115 @@ index 00000000..b06cdd03
 +namespace dxvk
 +{
 +
++  // DXVK_GAZE_FILE / DXVK_GAZE_CONFIG may be given as plain Linux paths.
++  static std::string gazePath(const char *name, const char *fallback)
++  {
++    std::string path = env::getEnvVar(name);
++    if (path.empty())
++      path = fallback;
++#ifdef _WIN32
++    if (!path.empty() && path[0] == '/')
++    {
++      std::replace(path.begin(), path.end(), '/', '\\');
++      path = "Z:" + path;
++    }
++#endif
++    return path;
++  }
++
 +  // Keep worker implementation and source ownership out of the rendering
 +  // header. Destruction joins the worker before closing its source mapping.
 +  struct DxvkGazeVrs::Worker
 +  {
++    // Published by the worker, copied by the render thread with a try-lock.
++    dxvk::mutex configMutex;
++    GazeConfig config;
++    std::atomic<uint32_t> generation = {0u};
++
++    // Written by the render thread, reported in the status file.
++    std::atomic<uint32_t> candidates = {0u}, attached = {0u}, uploads = {0u};
++    std::atomic<uint32_t> width = {0u}, height = {0u}, layers = {0u}, format = {0u},
++        samples = {0u}, coarse = {0u};
++    VkExtent2D texel = {};
++
++    // Worker thread only from here on.
++    GazeConfigFile file;
 +    DxvkGazeSource source;
++    std::string statusPath;
++    uint32_t statusTick = 0u;
++    std::chrono::steady_clock::time_point nextPoll = {}, nextStatus = {};
++
 +    struct Generator
 +    {
-+      DxvkGazeSource *source;
++      Worker *worker;
 +      bool operator()(const GazeMapRequest &pass, GazeMap &result) const
-+      { return source->generate(pass, result); }
++      {
++        worker->tick();
++        return worker->source.generate(pass, result);
++      }
 +    };
++    // Last member: its thread starts in the constructor and uses the rest.
 +    GazeMapWorker<dxvk::thread, dxvk::mutex, dxvk::condition_variable, Generator> maps;
-+    Worker()
-+    : maps([] { env::setThreadName("dxvk-gaze-map"); },
-+        Generator{&source}, std::chrono::milliseconds(4)) { }
-+  };
 +
-+  static float getEnvFloat(const char *name, float fallback)
-+  {
-+    std::string v = env::getEnvVar(name);
-+    return v.empty() ? fallback : float(std::atof(v.c_str()));
-+  }
++    Worker(GazeConfigFile configFile, VkExtent2D texelSize)
++    : config(configFile.config()), texel(texelSize), file(std::move(configFile)),
++      source(gazePath("DXVK_GAZE_FILE", "Z:\\dev\\shm\\vrchat_dfr_gaze"), config),
++      statusPath(file.path().empty() ? std::string() : file.path() + ".status"),
++      maps([] { env::setThreadName("dxvk-gaze-map"); },
++        Generator{this}, std::chrono::milliseconds(4)) { }
++
++    void tick()
++    {
++      const auto now = std::chrono::steady_clock::now();
++      if (now >= nextPoll)
++      {
++        nextPoll = now + std::chrono::milliseconds(250);
++        std::vector<std::string> messages;
++        const bool changed = file.reload(messages);
++        for (const auto &m : messages)
++          Logger::warn(str::format("GazeVRS: ", m));
++        if (changed)
++        {
++          source.setConfig(file.config());
++          {
++            std::lock_guard<dxvk::mutex> lock(configMutex);
++            config = file.config();
++          }
++          generation.fetch_add(1u, std::memory_order_release);
++          Logger::info(str::format("GazeVRS: config reloaded: ", file.config().describe()));
++        }
++      }
++      if (!statusPath.empty() && now >= nextStatus)
++      {
++        nextStatus = now + std::chrono::seconds(1);
++        writeStatus();
++      }
++    }
++
++    // One small file a second so "is it actually foveating?" can be answered
++    // from the host without a Proton log.
++    void writeStatus()
++    {
++      static const char *const states[] = {"none", "live", "held", "fallback", "fake"};
++      const uint32_t code = coarse.load();
++      char text[512];
++      const int length = std::snprintf(text, sizeof(text),
++          "tick=%u\nenabled=%d\ngaze=%s\nsource=%s\ncandidate_passes_per_s=%u\n"
++          "foveated_passes_per_s=%u\nmap_uploads_per_s=%u\npass=%ux%u layers=%u fmt=%u samples=%u\n"
++          "coarse=%ux%u\ntexel=%ux%u\n",
++          ++statusTick, int(file.config().enabled), states[uint32_t(source.state())],
++          source.sourceOpen() ? "open" : "closed", candidates.exchange(0u), attached.exchange(0u),
++          uploads.exchange(0u), width.load(), height.load(), layers.load(), format.load(),
++          samples.load(), 1u << (code >> 2u), 1u << (code & 3u), texel.width, texel.height);
++      if (length <= 0)
++        return;
++      if (std::FILE *out = std::fopen(statusPath.c_str(), "wb"))
++      {
++        std::fwrite(text, 1u, std::min(size_t(length), sizeof(text) - 1u), out);
++        std::fclose(out);
++      }
++    }
++  };
 +
 +  static uint32_t getFragmentRateCode(VkExtent2D size)
 +  {
@@ -982,57 +1431,46 @@ index 00000000..b06cdd03
 +  {
 +    static const bool requested = env::getEnvVar("DXVK_GAZE_VRS") == "1";
 +
-+    return requested && device->features().khrFragmentShadingRate.attachmentFragmentShadingRate;
++    if (!requested)
++      return false;
++
++    // Tiling GPUs render through secondary command buffers, which this
++    // integration does not set the dynamic shading rate for.
++    const bool supported = device->features().khrFragmentShadingRate.attachmentFragmentShadingRate
++        && !device->perfHints().preferRenderPassOps;
++
++    static std::atomic<bool> logged = {false};
++    if (!supported && !logged.exchange(true))
++      Logger::warn("GazeVRS: DXVK_GAZE_VRS=1 ignored: no attachment shading rate support on this device");
++
++    return supported;
 +  }
 +
 +  DxvkGazeVrs::DxvkGazeVrs(DxvkDevice *device)
 +      : m_device(device)
 +  {
-+    m_r1 = getEnvFloat("DXVK_GAZE_R1", m_r1);
-+    m_r2 = getEnvFloat("DXVK_GAZE_R2", m_r2);
-+    m_fullArea = getEnvFloat("DXVK_GAZE_FULL_AREA", m_fullArea);
-+    m_midArea = getEnvFloat("DXVK_GAZE_MID_AREA", m_midArea);
-+    m_minSize = uint32_t(getEnvFloat("DXVK_GAZE_MINSIZE", float(m_minSize)));
-+    m_debug = env::getEnvVar("DXVK_GAZE_DEBUG") == "1";
-+    m_dot = env::getEnvVar("DXVK_GAZE_DOT") == "1";
-+    m_dotRadius = int32_t(getEnvFloat("DXVK_GAZE_DOT_RADIUS", float(m_dotRadius)));
-+
-+    m_onlySamples = uint32_t(getEnvFloat("DXVK_GAZE_SAMPLES", 0.0f));
-+    m_onlyFormat = uint32_t(getEnvFloat("DXVK_GAZE_FMT", 0.0f));
-+
-+    m_grid = env::getEnvVar("DXVK_GAZE_FAKE") == "grid";
-+
-+    // Raw shading rate code for the outer zone: (log2(w) << 2) | log2(h)
-+    // 5 = 2x2, 6 = 2x4, 9 = 4x2, 10 = 4x4.
-+    // "auto" uses the largest rate supported by the current pass.
-+    std::string coarse = env::getEnvVar("DXVK_GAZE_COARSE");
-+
-+    if (coarse.empty())
-+      coarse = env::getEnvVar("DXVK_GAZE_MAXRATE");
-+
-+    if (coarse == "auto")
-+    {
-+      m_autoCoarse = true;
-+    }
-+    else if (!coarse.empty())
-+    {
-+      m_coarse = uint32_t(std::atof(coarse.c_str()));
-+    }
-+
-+    std::string forced = env::getEnvVar("DXVK_GAZE_SIZE");
-+    if (!forced.empty())
-+      std::sscanf(forced.c_str(), "%ux%u", &m_forceW, &m_forceH);
++    std::vector<std::string> messages;
++    GazeConfigFile file(gazePath("DXVK_GAZE_CONFIG", ""),
++        gazeConfigFromEnv([](const char *name) { return env::getEnvVar(name); }, messages));
++    file.reload(messages);
++    for (const auto &m : messages)
++      Logger::warn(str::format("GazeVRS: ", m));
++    m_cfg = file.config();
 +
 +    m_ok = createResources();
 +    if (m_ok)
-+      m_mapWorker = std::make_unique<Worker>();
++    {
++      m_mapWorker = std::make_unique<Worker>(std::move(file), m_texel);
++      // Start the worker's poll loop now, so the config file is watched even
++      // before (or without) a pass that qualifies for VRS.
++      m_mapWorker->maps.exchange(GazeMapRequest(), true, m_cpuMap);
++    }
 +
 +    Logger::info(str::format("GazeVRS: init ", m_ok ? "ok" : "FAILED",
 +                             ", double-buffered, texel ", m_texel.width, "x", m_texel.height,
 +                             ", max tiles ", m_maxTiles.width, "x", m_maxTiles.height,
-+                             ", r1=", m_r1, " r2=", m_r2, ", full_area=", m_fullArea,
-+                             ", mid_area=", m_midArea, ", coarse=", coarse,
-+                             ", async map worker"));
++                             ", layers ", m_layers, ", async map worker"));
++    Logger::info(str::format("GazeVRS: config: ", m_cfg.describe()));
 +  }
 +
 +  DxvkGazeVrs::~DxvkGazeVrs()
@@ -1056,6 +1494,15 @@ index 00000000..b06cdd03
 +    const auto &memProps = m_device->adapter()->memoryProperties();
 +
 +    const auto &fsrProps = m_device->properties().khrFragmentShadingRate;
++
++    if (!(m_device->getFormatFeatures(VK_FORMAT_R8_UINT).optimal
++        & VK_FORMAT_FEATURE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR))
++    {
++      Logger::warn("GazeVRS: R8_UINT cannot be used as a shading rate attachment");
++      return false;
++    }
++
++    m_layers = fsrProps.layeredShadingRateAttachments ? MaxLayers : 1u;
 +
 +    if (fsrProps.minFragmentShadingRateAttachmentTexelSize.width && fsrProps.minFragmentShadingRateAttachmentTexelSize.height)
 +      m_texel = fsrProps.minFragmentShadingRateAttachmentTexelSize;
@@ -1084,7 +1531,7 @@ index 00000000..b06cdd03
 +      imageInfo.format = VK_FORMAT_R8_UINT;
 +      imageInfo.extent = {m_maxTiles.width, m_maxTiles.height, 1u};
 +      imageInfo.mipLevels = 1u;
-+      imageInfo.arrayLayers = MaxLayers;
++      imageInfo.arrayLayers = m_layers;
 +      imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
 +      imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
 +      imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1112,7 +1559,7 @@ index 00000000..b06cdd03
 +      viewInfo.image = slot->image;
 +      viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 +      viewInfo.format = VK_FORMAT_R8_UINT;
-+      viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, MaxLayers};
++      viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
 +
 +      if (vk->vkCreateImageView(vk->device(), &viewInfo, nullptr, &slot->view))
 +        return false;
@@ -1120,7 +1567,7 @@ index 00000000..b06cdd03
 +      VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
 +      // Each layer starts at a four-byte aligned offset in the upload buffer.
 +      const VkDeviceSize layerStride = (VkDeviceSize(m_maxTiles.width) * m_maxTiles.height + 3u) & ~VkDeviceSize(3u);
-+      bufferInfo.size = layerStride * MaxLayers;
++      bufferInfo.size = layerStride * m_layers;
 +      bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 +      bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 +
@@ -1142,6 +1589,106 @@ index 00000000..b06cdd03
 +    return true;
 +  }
 +
++  void DxvkGazeVrs::refreshConfig()
++  {
++    if (!m_mapWorker)
++      return;
++    const uint32_t generation = m_mapWorker->generation.load(std::memory_order_acquire);
++    if (generation == m_cfgGeneration)
++      return;
++    // Never wait for the worker; pick the change up on a later pass instead.
++    std::unique_lock<dxvk::mutex> lock(m_mapWorker->configMutex, std::try_to_lock);
++    if (!lock.owns_lock())
++      return;
++    m_cfg = m_mapWorker->config;
++    m_cfgGeneration = generation;
++  }
++
++  const DxvkGazeVrs::RateSet &DxvkGazeVrs::queryRates(VkSampleCountFlagBits samples)
++  {
++    for (const auto &set : m_rates)
++    {
++      if (set.samples == samples)
++        return set;
++    }
++
++    RateSet set;
++    set.samples = samples;
++
++    auto vki = m_device->vki();
++    VkPhysicalDevice physicalDevice = m_device->adapter()->handle();
++    uint32_t count = 0u;
++    VkResult result = vki->vkGetPhysicalDeviceFragmentShadingRatesKHR(physicalDevice, &count, nullptr);
++    std::vector<VkPhysicalDeviceFragmentShadingRateKHR> rates(count);
++
++    for (auto &rate : rates)
++      rate.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR;
++
++    if (result == VK_SUCCESS && count)
++      result = vki->vkGetPhysicalDeviceFragmentShadingRatesKHR(physicalDevice, &count, rates.data());
++
++    if (result == VK_SUCCESS || result == VK_INCOMPLETE)
++    {
++      // Reported largest first.
++      for (uint32_t i = 0u; i < count && i < rates.size(); i++)
++      {
++        const VkExtent2D size = rates[i].fragmentSize;
++        if (!(rates[i].sampleCounts & VkSampleCountFlags(samples)) || size.width > 4u || size.height > 4u)
++          continue;
++        const uint32_t code = getFragmentRateCode(size);
++        if (!(set.mask & (1u << code)))
++          set.codes.push_back(code);
++        set.mask |= 1u << code;
++      }
++    }
++    else
++    {
++      Logger::warn(str::format("GazeVRS: failed to query fragment shading rates, result=", int32_t(result)));
++    }
++
++    // 1x1 is always available; without it the list above was unusable.
++    if (!(set.mask & 1u))
++    {
++      set.codes.push_back(0u);
++      set.mask |= 1u;
++    }
++
++    m_rates.push_back(set);
++    return m_rates.back();
++  }
++
++  // Never hand the driver a rate it did not advertise for this sample count:
++  // pick the requested rate, or the largest supported one that is no coarser.
++  uint32_t DxvkGazeVrs::resolveCoarse(VkSampleCountFlagBits samples)
++  {
++    const RateSet &set = queryRates(samples);
++    uint32_t code = set.codes.front();
++
++    if (!m_cfg.autoCoarse)
++    {
++      code = 0u;
++      for (uint32_t candidate : set.codes)
++      {
++        if ((candidate >> 2u) <= (m_cfg.coarse >> 2u) && (candidate & 3u) <= (m_cfg.coarse & 3u))
++        {
++          code = candidate;
++          break;
++        }
++      }
++    }
++
++    const uint32_t key = code | (uint32_t(samples) << 8u) | (m_cfg.autoCoarse ? 1u << 16u : m_cfg.coarse << 17u);
++    if (m_loggedCoarse.size() < 64u
++        && std::find(m_loggedCoarse.begin(), m_loggedCoarse.end(), key) == m_loggedCoarse.end())
++    {
++      m_loggedCoarse.push_back(key);
++      Logger::info(str::format("GazeVRS: coarse rate ", 1u << (code >> 2u), "x", 1u << (code & 3u),
++          " (code ", code, ") for ", uint32_t(samples), " sample(s), requested ",
++          m_cfg.autoCoarse ? std::string("auto") : str::format("code ", m_cfg.coarse)));
++    }
++    return code;
++  }
++
 +  bool DxvkGazeVrs::prepare(
 +      DxvkCommandList *cmd,
 +      VkExtent2D extent,
@@ -1156,20 +1703,23 @@ index 00000000..b06cdd03
 +    bool candidate = false;
 +    bool sbs = false;
 +
++    refreshConfig();
++    const GazeConfig &cfg = m_cfg;
++
 +    if (m_ok)
 +    {
-+      if (m_forceW)
++      if (cfg.forceW)
 +      {
-+        candidate = extent.width == m_forceW && extent.height == m_forceH && layers <= MaxLayers;
++        candidate = extent.width == cfg.forceW && extent.height == cfg.forceH && layers <= MaxLayers;
 +        sbs = candidate && layers == 1u && extent.width * 10u >= extent.height * 18u;
 +      }
 +      else if (layers == MaxLayers)
 +      {
-+        candidate = extent.width >= m_minSize && extent.height >= m_minSize;
++        candidate = extent.width >= cfg.minSize && extent.height >= cfg.minSize;
 +      }
 +      else if (layers == 1u)
 +      {
-+        sbs = extent.width * 10u >= extent.height * 18u && extent.height >= m_minSize;
++        sbs = extent.width * 10u >= extent.height * 18u && extent.height >= cfg.minSize;
 +        candidate = sbs;
 +      }
 +    }
@@ -1179,15 +1729,15 @@ index 00000000..b06cdd03
 +      candidate = false;
 +
 +    // Optional pass filters, to pick the scene pass out of several same-sized passes
-+    if (candidate && m_onlySamples && uint32_t(samples) != m_onlySamples)
++    if (candidate && cfg.onlySamples && uint32_t(samples) != cfg.onlySamples)
 +      candidate = false;
 +
-+    if (candidate && m_onlyFormat && uint32_t(colorFormat) != m_onlyFormat)
++    if (candidate && cfg.onlyFormat && uint32_t(colorFormat) != cfg.onlyFormat)
 +      candidate = false;
 +
 +    auto now = std::chrono::steady_clock::now();
 +
-+    if (m_debug)
++    if (cfg.debug)
 +    {
 +      m_shapes[{extent.width, extent.height, layers, uint32_t(colorFormat), uint32_t(samples)}]++;
 +
@@ -1210,73 +1760,23 @@ index 00000000..b06cdd03
 +      }
 +    }
 +
-+    if (!candidate)
-+      return false;
++    const uint32_t usedLayers = sbs ? 1u : MaxLayers;
 +
-+    uint32_t coarse = m_coarse;
-+
-+    if (m_autoCoarse && m_autoCoarseSamples != samples)
++    if (candidate && usedLayers > m_layers)
 +    {
-+      m_autoCoarseSamples = samples;
-+      m_autoCoarseRate = 0u;
-+
-+      auto vki = m_device->vki();
-+      VkPhysicalDevice physicalDevice = m_device->adapter()->handle();
-+
-+      uint32_t count = 0u;
-+      VkResult result = vki->vkGetPhysicalDeviceFragmentShadingRatesKHR(
-+          physicalDevice,
-+          &count, nullptr);
-+
-+      if (result == VK_SUCCESS && count > 0u)
-+      {
-+        std::vector<VkPhysicalDeviceFragmentShadingRateKHR> rates(count);
-+
-+        for (auto &rate : rates)
-+          rate.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_KHR;
-+
-+        result = vki->vkGetPhysicalDeviceFragmentShadingRatesKHR(
-+            physicalDevice, &count, rates.data());
-+
-+        Logger::info(str::format(
-+            "GazeVRS: shading rate query result=", int32_t(result),
-+            " count=", count));
-+
-+        if (result == VK_SUCCESS || result == VK_INCOMPLETE)
-+        {
-+          VkSampleCountFlags sampleMask = VkSampleCountFlags(samples);
-+
-+          for (const auto &rate : rates)
-+          {
-+            if (!(rate.sampleCounts & sampleMask))
-+              continue;
-+
-+            m_autoCoarseRate = getFragmentRateCode(rate.fragmentSize);
-+
-+            Logger::info(str::format(
-+                "GazeVRS: auto coarse=", rate.fragmentSize.width, "x", rate.fragmentSize.height,
-+                " (code ", m_autoCoarseRate, "), samples=", uint32_t(samples)));
-+
-+            break;
-+          }
-+        }
-+      }
-+
-+      if (result != VK_SUCCESS && result != VK_INCOMPLETE)
-+      {
-+        Logger::warn(str::format(
-+            "GazeVRS: failed to query fragment shading rates, result=",
-+            int32_t(result)));
-+      }
-+      else if (count == 0u)
-+      {
-+        Logger::warn(
-+            "GazeVRS: no fragment shading rates reported");
-+      }
++      if (!m_loggedLayered)
++        Logger::warn("GazeVRS: this driver has no layered shading rate attachments; only side-by-side eye passes are foveated");
++      m_loggedLayered = true;
++      candidate = false;
 +    }
 +
-+    if (m_autoCoarse)
-+      coarse = m_autoCoarseRate;
++    // Switched off at run time: pipelines keep their dynamic state, the
++    // pass simply gets no attachment and shades at full rate.
++    if (!candidate || !cfg.enabled)
++      return false;
++
++    m_mapWorker->candidates.fetch_add(1u, std::memory_order_relaxed);
++    const uint32_t coarse = resolveCoarse(samples);
 +
 +    const uint32_t tilesX = (extent.width + m_texel.width - 1u) / m_texel.width;
 +    const uint32_t tilesY = (extent.height + m_texel.height - 1u) / m_texel.height;
@@ -1284,7 +1784,6 @@ index 00000000..b06cdd03
 +    if (tilesX > m_maxTiles.width || tilesY > m_maxTiles.height)
 +      return false;
 +
-+    const uint32_t usedLayers = sbs ? 1u : MaxLayers;
 +    const float eyeW = sbs ? float(extent.width) * 0.5f : float(extent.width);
 +    const std::array<uint32_t, 5> shape = {
 +        extent.width, extent.height, usedLayers, uint32_t(colorFormat), uint32_t(samples)};
@@ -1303,7 +1802,7 @@ index 00000000..b06cdd03
 +      ready.oldLayout = ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
 +      ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 +      ready.image = m_slots[m_buffers.active]->image;
-+      ready.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, MaxLayers};
++      ready.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
 +      VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
 +      dep.imageMemoryBarrierCount = 1u;
 +      dep.pImageMemoryBarriers = &ready;
@@ -1314,10 +1813,10 @@ index 00000000..b06cdd03
 +    request.shape = shape;
 +    request.texel = {m_texel.width, m_texel.height};
 +    request.coarse = coarse;
-+    request.r1 = m_r1;
-+    request.r2 = m_r2;
-+    request.fullArea = m_fullArea;
-+    request.midArea = m_midArea;
++    request.r1 = cfg.r1;
++    request.r2 = cfg.r2;
++    request.fullArea = cfg.fullArea;
++    request.midArea = cfg.midArea;
 +
 +    if (m_mapWorker->maps.failed())
 +    {
@@ -1333,14 +1832,13 @@ index 00000000..b06cdd03
 +    // A completed map can lag behind gaze, but must match this render target.
 +    // Do not upload a map already displayed or already pending on the GPU.
 +    auto matches = [&](const Rc<Slot> &slot) {
-+      return slot->shape == m_cpuMap->request.shape && slot->flags == m_cpuMap->request.flags
-+          && slot->coarse == m_cpuMap->request.coarse && slot->center == m_cpuMap->request.center;
++      return slot->filled && slot->request.sameMap(m_cpuMap->request);
 +    };
 +    const bool upload = back >= 0 && m_cpuMap && m_cpuMap->valid
 +        && m_cpuMap->request.shape == shape && m_cpuMap->request.coarse == coarse
 +        && (m_buffers.active < 0 || !matches(m_slots[m_buffers.active]));
 +
-+    VkImageSubresourceRange allLayers = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, MaxLayers};
++    VkImageSubresourceRange allLayers = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
 +
 +    if (upload)
 +    {
@@ -1409,11 +1907,9 @@ index 00000000..b06cdd03
 +      cmd->cmdCopyBufferToImage(DxvkCmdBuffer::ExecBuffer, &copyInfo);
 +
 +      slot->layoutInit = true;
-+      slot->shape = shape;
-+      slot->flags = mapRequest.flags;
-+      slot->coarse = mapRequest.coarse;
-+      slot->center = mapRequest.center;
-+      slot->dotCenter = mapRequest.dotCenter;
++      slot->filled = true;
++      slot->request = mapRequest;
++      m_mapWorker->uploads.fetch_add(1u, std::memory_order_relaxed);
 +      cmd->track(slot);
 +      cmd->queueSignal(slot->completion, m_buffers.upload(back));
 +    }
@@ -1421,26 +1917,38 @@ index 00000000..b06cdd03
 +    // During startup or a render-target change, use full-rate rendering until
 +    // a compatible attachment is ready rather than waiting for an upload.
 +    if (!m_cpuMap || !m_cpuMap->valid || m_buffers.active < 0
-+        || m_slots[m_buffers.active]->shape != shape || m_slots[m_buffers.active]->coarse != coarse)
++        || !m_slots[m_buffers.active]->filled
++        || m_slots[m_buffers.active]->request.shape != shape
++        || m_slots[m_buffers.active]->request.coarse != coarse)
 +      return false;
 +
 +    auto &front = m_slots[m_buffers.active];
 +    cmd->track(front);
 +    cmd->queueSignal(front->completion, m_buffers.read());
++
++    m_mapWorker->attached.fetch_add(1u, std::memory_order_relaxed);
++    m_mapWorker->width.store(extent.width, std::memory_order_relaxed);
++    m_mapWorker->height.store(extent.height, std::memory_order_relaxed);
++    m_mapWorker->layers.store(layers, std::memory_order_relaxed);
++    m_mapWorker->format.store(uint32_t(colorFormat), std::memory_order_relaxed);
++    m_mapWorker->samples.store(uint32_t(samples), std::memory_order_relaxed);
++    m_mapWorker->coarse.store(coarse, std::memory_order_relaxed);
++
++    const bool grid = cfg.fake == GazeFake::Grid;
 +    // Debug overlay (sbs only): colored squares drawn at the end of the pass.
 +    //  - normal: magenta dots at the displayed attachment's saved gaze,
 +    //    including its upload latency and tile-granularity update caching.
 +    //  - FAKE=grid: 8 differently colored squares at known framebuffer positions
-+    if ((m_dot || m_grid) && sbs)
++    if ((cfg.dot || grid) && sbs)
 +    {
 +      g_gazeDot.passActive = true;
 +      g_gazeDot.width = int32_t(extent.width);
 +      g_gazeDot.height = int32_t(extent.height);
-+      g_gazeDot.radius = m_dotRadius;
-+      g_gazeDot.x[0] = front->dotCenter[0];
-+      g_gazeDot.y[0] = front->dotCenter[1];
-+      g_gazeDot.x[1] = int32_t(eyeW) + front->dotCenter[2];
-+      g_gazeDot.y[1] = front->dotCenter[3];
++      g_gazeDot.radius = cfg.dotRadius;
++      g_gazeDot.x[0] = front->request.dotCenter[0];
++      g_gazeDot.y[0] = front->request.dotCenter[1];
++      g_gazeDot.x[1] = int32_t(eyeW) + front->request.dotCenter[2];
++      g_gazeDot.y[1] = front->request.dotCenter[3];
 +      g_gazeDot.count = 0;
 +
 +      auto add = [&](float px, float py, int32_t r, float cr, float cg, float cb)
@@ -1456,7 +1964,7 @@ index 00000000..b06cdd03
 +        d.rgb[2] = cb;
 +      };
 +
-+      if (m_grid)
++      if (grid)
 +      {
 +        const int32_t sz = 70;
 +        add(0.03f, 0.06f, sz, 1.0f, 0.0f, 0.0f); // top-left corner      red
@@ -1470,8 +1978,8 @@ index 00000000..b06cdd03
 +      }
 +      else
 +      {
-+        add(float(g_gazeDot.x[0]) / float(extent.width), float(g_gazeDot.y[0]) / float(extent.height), m_dotRadius, 1.0f, 0.0f, 1.0f);
-+        add(float(g_gazeDot.x[1]) / float(extent.width), float(g_gazeDot.y[1]) / float(extent.height), m_dotRadius, 1.0f, 0.0f, 1.0f);
++        add(float(g_gazeDot.x[0]) / float(extent.width), float(g_gazeDot.y[0]) / float(extent.height), cfg.dotRadius, 1.0f, 0.0f, 1.0f);
++        add(float(g_gazeDot.x[1]) / float(extent.width), float(g_gazeDot.y[1]) / float(extent.height), cfg.dotRadius, 1.0f, 0.0f, 1.0f);
 +      }
 +    }
 +
@@ -1484,13 +1992,15 @@ index 00000000..b06cdd03
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.h b/src/dxvk/dxvk_gaze_vrs.h
 new file mode 100644
-index 00000000..ec6c4244
+index 00000000..9f4ebdcf
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,101 @@
 +#pragma once
 +
 +#include "dxvk_gaze_buffer.h"
++#include "dxvk_gaze_config.h"
++#include "dxvk_gaze_map.h"
 +
 +#include <array>
 +#include <chrono>
@@ -1505,7 +2015,6 @@ index 00000000..ec6c4244
 +
 +  class DxvkDevice;
 +  class DxvkCommandList;
-+  struct GazeMap;
 +
 +  bool dxvkGazeVrsEnabled(const DxvkDevice *device);
 +
@@ -1543,11 +2052,9 @@ index 00000000..ec6c4244
 +      VkDeviceMemory bufferMem = VK_NULL_HANDLE;
 +      Rc<sync::Fence> completion = new sync::Fence();
 +      bool layoutInit = false;
-+      std::array<uint32_t, 5> shape = {};
-+      uint32_t flags = ~0u;
-+      uint32_t coarse = ~0u;
-+      std::array<int32_t, 4> center = {-1, -1, -1, -1};
-+      std::array<int32_t, 4> dotCenter = {};
++      // Request that produced the map this slot holds; filled once uploaded.
++      bool filled = false;
++      GazeMapRequest request;
 +    };
 +    std::array<Rc<Slot>, 2> m_slots;
 +    GazeVrsBufferState m_buffers;
@@ -1560,24 +2067,28 @@ index 00000000..ec6c4244
 +    VkExtent2D m_texel = {16u, 16u};
 +    VkExtent2D m_maxTiles = {512u, 512u};
 +
-+    // Configuration
-+    float m_r1 = 0.20f;
-+    float m_r2 = 0.40f;
-+    float m_fullArea = -1.0f;
-+    float m_midArea = -1.0f;
-+    uint32_t m_coarse = 5u; // raw rate code of the outer zone, 5 = 2x2, 10 = 4x4
-+    bool m_autoCoarse = false;
-+    uint32_t m_autoCoarseRate = 0u;
-+    VkSampleCountFlagBits m_autoCoarseSamples = VkSampleCountFlagBits(0);
-+    uint32_t m_minSize = 700u;
-+    bool m_debug = false;
-+    bool m_dot = false;
-+    bool m_grid = false;
-+    int32_t m_dotRadius = 24;
-+    uint32_t m_onlySamples = 0u; // 0 = any; else only passes with this color sample count
-+    uint32_t m_onlyFormat = 0u;  // 0 = any; else only passes with this VkFormat value
-+    uint32_t m_forceW = 0u;
-+    uint32_t m_forceH = 0u;
++    // Layers of the attachment: 1 when the driver has no layered
++    // shading-rate attachments, in which case only SBS passes are handled.
++    uint32_t m_layers = MaxLayers;
++    bool m_loggedLayered = false;
++
++    // Render-thread copy of the live configuration, refreshed without
++    // blocking whenever the worker publishes a new generation.
++    GazeConfig m_cfg;
++    uint32_t m_cfgGeneration = 0u;
++    void refreshConfig();
++
++    // Shading rates the device supports, per sample count.
++    struct RateSet
++    {
++      VkSampleCountFlagBits samples = VkSampleCountFlagBits(0);
++      uint32_t mask = 0u; // bit per rate code
++      std::vector<uint32_t> codes; // largest first
++    };
++    std::vector<RateSet> m_rates;
++    std::vector<uint32_t> m_loggedCoarse; // one log line per distinct outcome
++    const RateSet &queryRates(VkSampleCountFlagBits samples);
++    uint32_t resolveCoarse(VkSampleCountFlagBits samples);
 +
 +    std::map<std::array<uint32_t, 5>, uint32_t> m_shapes; // (w, h, layers, fmt, samples) -> pass count
 +    std::chrono::steady_clock::time_point m_nextSummary = {};
@@ -1587,7 +2098,7 @@ index 00000000..ec6c4244
 +
 +}
 diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index f40b6ec2..241fc731 100644
+index f40b6ec2..2d79bf9e 100644
 --- a/src/dxvk/dxvk_graphics.cpp
 +++ b/src/dxvk/dxvk_graphics.cpp
 @@ -3,6 +3,7 @@
@@ -1608,7 +2119,18 @@ index f40b6ec2..241fc731 100644
      VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
  
      if (!dynamicStates.empty()) {
-@@ -821,6 +825,9 @@ namespace dxvk {
+@@ -526,6 +530,10 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &state.rtInfo };
+     flags.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
+ 
++    // Required for every pipeline drawn in a pass with a shading rate attachment.
++    if (dxvkGazeVrsEnabled(m_device))
++      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++
+     if (state.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
+       flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
+ 
+@@ -821,6 +829,9 @@ namespace dxvk {
        }
      }
  
@@ -1618,6 +2140,28 @@ index f40b6ec2..241fc731 100644
      if (dyInfo.dynamicStateCount)
        dyInfo.pDynamicStates = dyStates.data();
    }
+@@ -1386,6 +1397,10 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
+     flags.flags = vs.linkFlags | fs.linkFlags;
+ 
++    // Required for every pipeline drawn in a pass with a shading rate attachment.
++    if (dxvkGazeVrsEnabled(m_device))
++      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++
+     if (m_device->canUseDescriptorHeap())
+       flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
+ 
+@@ -1470,6 +1485,10 @@ namespace dxvk {
+ 
+     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
+ 
++    // Required for every pipeline drawn in a pass with a shading rate attachment.
++    if (dxvkGazeVrsEnabled(m_device))
++      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++
+     if (!m_flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
+       if (key.foState.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
+         flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
 index 98eea481..c00cb29a 100644
 --- a/src/dxvk/dxvk_graphics.h
@@ -1632,7 +2176,7 @@ index 98eea481..c00cb29a 100644
      bool eq(const DxvkGraphicsPipelineDynamicState& other) const;
  
 diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
-index a133519d..c40fc088 100644
+index a133519d..270c6474 100644
 --- a/src/dxvk/dxvk_shader.cpp
 +++ b/src/dxvk/dxvk_shader.cpp
 @@ -1,4 +1,5 @@
@@ -1651,7 +2195,18 @@ index a133519d..c40fc088 100644
      VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
      dyInfo.dynamicStateCount  = dynamicStates.size();
      dyInfo.pDynamicStates     = dynamicStates.data();
-@@ -487,6 +491,9 @@ namespace dxvk {
+@@ -412,6 +416,10 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flagsInfo = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &rtInfo };
+     flagsInfo.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR | flags;
+ 
++    // Required for every pipeline drawn in a pass with a shading rate attachment.
++    if (dxvkGazeVrsEnabled(m_device))
++      flagsInfo.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++
+     if (m_device->canUseDescriptorHeap())
+       flagsInfo.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
+ 
+@@ -487,6 +495,9 @@ namespace dxvk {
        dynamicStates.push_back(VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT);
      }
  
@@ -1661,6 +2216,17 @@ index a133519d..c40fc088 100644
      VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
      dyInfo.dynamicStateCount  = dynamicStates.size();
      dyInfo.pDynamicStates     = dynamicStates.data();
+@@ -515,6 +526,10 @@ namespace dxvk {
+     VkPipelineCreateFlags2CreateInfo flagsInfo = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &rtInfo };
+     flagsInfo.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR | flags;
+ 
++    // Required for every pipeline drawn in a pass with a shading rate attachment.
++    if (dxvkGazeVrsEnabled(m_device))
++      flagsInfo.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
++
+     if (m_device->canUseDescriptorHeap())
+       flagsInfo.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
+ 
 diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
 index 6b12f95c..27f9bc5a 100644
 --- a/src/dxvk/meson.build

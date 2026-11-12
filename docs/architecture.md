@@ -71,14 +71,71 @@ DXVK's `Freshness` requires a sequence change after opening a mapping, so an
 abandoned file is not accepted at reader startup. An unchanged sequence expires
 after 100 ms measured with the reader's steady clock. This handles SIGKILL, a
 stalled API call and a crash during an odd sequence without comparing Wine and
-Linux clocks. Invalid packets disable VRS when observed. A stale mapping is
-closed; opening is throttled to once every 2 seconds, so replaced files can
-eventually be discovered as well.
+Linux clocks. A stale mapping is closed; opening is throttled to once every
+2 seconds, so replaced files can eventually be discovered as well.
+
+Whenever no live sample is available (invalid packet, stopped heartbeat, no
+file) the reader applies the tracking-loss policy: the last live gaze is reused
+for `hold_ms` (default 500, long enough for a blink), then `fallback` decides
+between publishing an invalid map, which makes the render thread drop the
+attachment and shade at full rate (`off`, default), and foveating around the
+centre of each eye (`center`). A held or fallback gaze is never mistaken for a
+live one: the status file reports `gaze=live|held|fallback|none`.
 
 The sample-age limit and heartbeat timeout are independent. If the runtime
 supplies no sample timestamp, sensor sample age cannot be checked, but tracking
 flags and heartbeat still apply. `--verbose` reports unknown timestamps and
 the reason a packet is invalid.
+
+## Settings and live reconfiguration
+
+`dxvk_gaze_config.h` (canonical copy: [shared/gaze_config.h](../shared/gaze_config.h),
+also used by `dfrctl`) holds every tunable in one `GazeConfig`. At start-up it
+is filled from the `DXVK_GAZE_*` environment variables. If `DXVK_GAZE_CONFIG`
+names a file, `dxvk-gaze-map` re-reads it every 250 ms and compares the
+content; values in the file override the environment key by key, and removing
+the file returns to the environment values.
+
+Values are validated when parsed (ranges, known rate codes, finite numbers).
+A file containing any unusable line is rejected as a whole and the previous
+configuration stays in effect, so a typo or a half-written file cannot apply
+partially. `dfrctl` validates with the same code before writing and replaces
+the file with a rename.
+
+A new configuration is published to the render thread through a generation
+counter and a mutex the render thread only try-locks; like map exchange, a
+contended lock just defers the change to a later pass. Pass selection (`fmt`,
+`samples`, `minsize`, `size`), `enabled`, radii and `coarse` therefore change
+without a restart. Radii and rate are part of each map request, so a change
+regenerates and re-uploads the attachment through the normal double-buffered
+path. `enabled = 0` stops attaching the image; pipelines keep their dynamic
+shading-rate state (set to 1x1 for every pass), so nothing is recompiled.
+
+Only two things are fixed at start-up: `DXVK_GAZE_VRS=1` itself, because it
+decides whether pipelines are created with dynamic shading-rate state and the
+shading-rate-attachment flag, and the gaze and config file paths.
+
+With a config file, the worker also writes `<config>.status` once a second:
+gaze state, whether the source is mapped, candidate/foveated passes and map
+uploads per second, the last foveated pass and the resolved coarse rate.
+
+## Device limits
+
+The integration only hands the driver what it advertised:
+
+- The coarse rate is resolved per sample count against
+  `vkGetPhysicalDeviceFragmentShadingRatesKHR`: `auto` takes the coarsest
+  rate, an explicit rate is replaced by the coarsest supported rate that is no
+  coarser in either direction.
+- Without `layeredShadingRateAttachments` (RADV, for example) the attachment is
+  a single layer and only side-by-side eye passes are foveated; two-layer
+  array passes are left at full rate.
+- `R8_UINT` must support use as a shading-rate attachment, otherwise gaze VRS
+  stays off.
+- Graphics pipelines and their libraries are created with
+  `VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR`.
+- Tiling GPUs, where DXVK renders through secondary command buffers, are not
+  supported; `DXVK_GAZE_VRS=1` is ignored there with a warning.
 
 ## VRS and render coordinates
 
@@ -137,6 +194,20 @@ contention, independent polling, invalidation/recovery and failure handling.
 Canonical DXVK additionally has a native source-adapter test for fake gaze,
 coordinate transforms and fixed-gaze caching.
 
-The patched Windows DLLs and Linux bridge build locally. Live HMD sampling,
-concurrent VRChat sessions, Wine/container file visibility, gaze-dot alignment
-and latency still require hardware validation.
+`bash scripts/test-dxvk-e2e.sh` tests the built DLLs themselves. A D3D11 probe
+(`tests/e2e/d3d11_vrs_probe.cpp`) runs under Wine on a real Vulkan driver,
+draws a per-pixel hash into a side-by-side RGBA16F target without a window, and
+reads the image back to classify every 8x8 tile as shaded per pixel, 2x2 or
+coarser. A stand-in bridge publishes a fixed gaze. The test then asserts, for
+1 and 4 samples: the full-rate disc is centred on the published gaze of each
+eye and has the configured area; `full_area`, `flip_y`, `swap_eyes`,
+`enabled` and `coarse` take effect while running; an invalid config file is
+rejected; a SIGKILLed bridge is held for `hold_ms`, then drops to full rate or
+to the centre fallback; a restarted bridge is picked up; removing the config
+file restores the environment values; the status file reports live foveation;
+without `DXVK_GAZE_VRS` nothing is foveated and no gaze code runs. All of it
+runs under the Khronos validation layer and fails on any validation error that
+the same probe does not produce without gaze VRS.
+
+Not covered by automation: sampling from a real HMD, gaze-dot alignment with
+VRChat's projection, and end-to-end latency.

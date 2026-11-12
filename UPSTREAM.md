@@ -78,6 +78,29 @@ before its source mapping is closed during destruction. Unit tests cover map
 contents, source transforms, request replacement, try-lock contention,
 independent polling, invalidation/recovery, failure and worker shutdown.
 
+### Changes on top of the canonical gaze revision
+
+The patch in this repository no longer equals `DXVK_GAZE_COMMIT`; it adds:
+
+- `dxvk_gaze_config.h`: validated settings, read from the environment and from
+  an optional config file (`DXVK_GAZE_CONFIG`) that is re-read while running,
+  plus a once-a-second status file. All former `getenv` parsing in
+  `dxvk_gaze_vrs.cpp` and `dxvk_gaze_source.cpp` goes through it.
+- Tracking-loss policy in `dxvk_gaze_source.cpp` (`hold_ms`, `fallback`).
+- Coarse-rate resolution against the device's supported rates per sample count
+  (previously a raw code was written to the attachment unchecked).
+- A single-layer attachment when `layeredShadingRateAttachments` is false
+  (previously a two-layer view was always created, which that limit forbids),
+  and a format-feature check for `R8_UINT`.
+- `VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR` on
+  graphics pipelines and libraries in `dxvk_graphics.cpp` / `dxvk_shader.cpp`
+  (VUID-vkCmdDraw-imageView-06183, found by the validation layer).
+- Gaze VRS refuses to enable on tiling GPUs, where the dynamic shading rate
+  was never set for the secondary command buffers.
+- Each uploaded slot remembers the full map request, so a radius or rate change
+  re-uploads; "gaze source opened" is logged once instead of every 2 seconds.
+- `DXVK_GAZE_FILE` / `DXVK_GAZE_CONFIG` accept Linux paths.
+
 The working DXVK build configuration was:
 
 ```text

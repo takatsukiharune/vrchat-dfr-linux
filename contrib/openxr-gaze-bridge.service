@@ -1,0 +1,22 @@
+# Sample systemd user unit: keeps the gaze bridge running in the background.
+# The bridge idles (retrying every 2 s) while WiVRn or the headset is absent.
+#
+#   cp contrib/openxr-gaze-bridge.service ~/.config/systemd/user/
+#   # adjust ExecStart to where openxr-gaze-bridge is installed
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now openxr-gaze-bridge
+#
+# Undo: systemctl --user disable --now openxr-gaze-bridge
+#       rm ~/.config/systemd/user/openxr-gaze-bridge.service
+[Unit]
+Description=OpenXR gaze bridge for DXVK gaze-driven VRS
+
+[Service]
+ExecStart=%h/.local/bin/openxr-gaze-bridge
+Restart=on-failure
+RestartSec=5
+# Uncomment if the bridge does not find WiVRn's OpenXR runtime by itself:
+# Environment=XR_RUNTIME_JSON=/path/to/openxr_wivrn.json
+
+[Install]
+WantedBy=default.target
