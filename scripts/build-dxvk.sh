@@ -44,6 +44,8 @@ fi
 
 [[ -d "$work/.git" ]] || git clone -q --no-checkout "$repo_dir/dxvk" "$work"
 cd "$work"
+# The work clone outlives checkouts: point it at this one's submodule.
+git remote set-url origin "$repo_dir/dxvk"
 if [[ -n "$variant" ]]; then
   fetch_variant_patches "$variant" "$work/.git/variant-patches" || {
     echo "Cannot fetch the DXVK patches of $variant. Pass --plain to build without them." >&2

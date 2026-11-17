@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build and test inside a podman container that is deleted after each command.
-# The repository is mounted read-only apart from dist/. Clones, build trees and
+# The repository is mounted read-only apart from dist/, at its own path, so the
+# relative paths git keeps in a worktree still lead somewhere. Clones, build trees and
 # the Wine prefix live in the volume vrchat-dfr-work. The GPU render node is
 # passed through for the end-to-end test only.
 #
@@ -46,7 +47,7 @@ run() {
   [[ "$common" == "$repo_dir/.git" ]] || options+=("--volume=$common:$common:ro")
   mkdir -p "$repo_dir/dist"
   "$engine" run --rm --init --security-opt label=disable --userns=keep-id \
-    -v "$repo_dir":/src:ro -v "$repo_dir/dist":/src/dist -v "$volume":/work:U -w /src \
+    -v "$repo_dir:$repo_dir:ro" -v "$repo_dir/dist:$repo_dir/dist" -v "$volume":/work:U -w "$repo_dir" \
     -e HOME=/work/home -e DFR_BUILD_DIR=/work/build -e DXVK_WORK_DIR=/work/dxvk-build \
     -e DFR_E2E_DIR=/work/e2e -e DXVK_BUILD_JOBS="${DXVK_BUILD_JOBS:-$(nproc)}" \
     "${options[@]}" "$(image "$stage")" bash -c "mkdir -p /work/home && $1"
