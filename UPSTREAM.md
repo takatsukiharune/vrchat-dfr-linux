@@ -15,6 +15,14 @@ then the hooks in existing DXVK files. `git am -3` also applies it to the DXVK
 commits of GE-Proton11-12 (`f8637768`), proton-cachyos 20261015 (`a78a467c`)
 and upstream master as of 2026-11-17, and those builds compile.
 
+For GE-Proton and proton-cachyos, `build-dxvk.sh --proton` first applies the
+DXVK patches of that release. GE-Proton lists them in
+`patches/protonprep-valve-staging.sh` of GloriousEggroll/proton-ge-custom at
+the release tag. proton-cachyos applies every file in `patches/dxvk` of
+CachyOS/proton-cachyos at the release tag, in name order. Builds with the ten
+patches of GE-Proton11-12 and the three of cachyos-11.0-20261015-slr pass the
+end-to-end test.
+
 The patch also includes the VRS tile-capacity fix from local DXVK commit
 `1e25cb242d23be9f5455dca11d8a0761d1c6daab`. Attachment capacity scales with
 the GPU's texel size to cover at least 8192 pixels per axis, subject to the

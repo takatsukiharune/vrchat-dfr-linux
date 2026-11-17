@@ -277,6 +277,12 @@ int doctor(const std::string& config, const std::string& gazeFile, const std::st
         bad("'" + name + "' has gaze DXVK " + version + ", but this Proton build ships" + shipped + "; build with --proton and reinstall");
       else
         good("app " + app + " uses '" + name + "' with gaze DXVK " + version);
+      // GE-Proton and proton-cachyos patch DXVK; a build for them names the release.
+      std::string release = firstLine(tool / "version");
+      release.erase(0, release.find(' ') + 1);
+      if (dll.find("DXVK_GAZE_VRS") != std::string::npos && version.find("-" + release + "-dfr.") == std::string::npos
+          && (release.rfind("GE-Proton", 0) == 0 || release.rfind("cachyos-", 0) == 0))
+        bad("this DXVK lacks the DXVK patches of " + release + "; build with --proton and reinstall");
       const std::string origin = firstLine(tool / ".dfr-clone");
       if (!origin.empty() && firstLine(fs::path(origin) / "version") != firstLine(tool / "version"))
         bad(origin + " changed after this copy was made; run install-dxvk.sh --refresh");

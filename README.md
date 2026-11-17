@@ -68,9 +68,13 @@ installer picks the matching build from `dist/` and refuses any other, unless
 you pass `--force`. A release zip, installed with `--dxvk-from
 ./dxvk-gaze-vrs.zip`, has DLLs for one DXVK commit and fits few Proton builds.
 
-GE-Proton and proton-cachyos add their own patches to DXVK. A build made here
-has the upstream commit plus the gaze patches, without theirs. GE-Proton 11-12
-carries fullscreen, HDR and overlay fixes for desktop games there.
+GE-Proton and proton-cachyos add their own patches to DXVK. For those two,
+`build --proton` fetches the DXVK patches of that release from its repository
+and applies them under the gaze patches, in the order the release's own build
+does. The DLL's version string then names the release, and the installer picks
+only such a build for it. `scripts/build-dxvk.sh --proton DIR --plain` leaves
+those patches out. Other Proton builds get the upstream commit plus the gaze
+patches.
 
 When Steam updates the Proton build, the copy stays as it was. `dfrctl doctor`
 reports that, and `install-dxvk.sh --refresh NAME` makes the copy again.
@@ -294,8 +298,9 @@ bash scripts/dxvk-patches.sh check master   # do the patches still apply to upst
 ```
 
 A DLL's version string names its base commit and this repository's revision,
-for example `v3.1.1-174-gf8637768-dfr.90f053c`. DXVK prints it at the start of
-its log.
+for example `v3.1.1-174-gf8637768-dfr.90f053c`, or
+`v3.1.1-174-gf8637768-GE-Proton11-12-dfr.90f053c` for a build with GE-Proton's
+patches. DXVK prints it at the start of its log.
 
 For extension enumeration without opening a session, use
 `./build/openxr-gaze-probe`. Add `--seconds 15` to that probe to inspect raw

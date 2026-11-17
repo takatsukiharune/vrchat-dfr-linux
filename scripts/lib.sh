@@ -31,6 +31,44 @@ proton_dxvk_commit() {
   version_commit "$(dll_dxvk_version "$dll")" | grep .
 }
 
+# Release name of a Proton variant that patches DXVK itself (GE-Proton11-12,
+# cachyos-11.0-20261015-slr). Empty for every other Proton build.
+proton_variant() {
+  local name
+  name="$(awk 'NR == 1 { print $2 }' "$1/version" 2>/dev/null)"
+  case "$name" in
+    GE-Proton*|cachyos-*) printf '%s\n' "$name" ;;
+  esac
+}
+
+# Writes the DXVK patches of that release into DIR as 01.patch, 02.patch, ...
+# in the order its own build applies them.
+fetch_variant_patches() {  # VARIANT DIR
+  local variant="$1" out="$2" url list src n=0 path
+  case "$variant" in
+    GE-Proton*) url="https://github.com/GloriousEggroll/proton-ge-custom.git" ;;
+    cachyos-*) url="https://github.com/CachyOS/proton-cachyos.git" ;;
+    *) return 1 ;;
+  esac
+  src="$(mktemp -d)"
+  git clone -q --depth 1 --filter=blob:none --sparse --branch "$variant" "$url" "$src" 2>/dev/null \
+    && git -C "$src" sparse-checkout set patches/dxvk || { rm -rf "$src"; return 1; }
+  if [[ "$variant" == GE-Proton* ]]; then
+    # GE lists its patches by hand, between `pushd dxvk` and the next `popd`.
+    list="$(sed -n '/^ *pushd dxvk$/,/^ *popd$/p' "$src/patches/protonprep-valve-staging.sh" \
+      | grep -v '^ *#' | grep -o 'patches/dxvk/[^" ]*\.patch')"
+  else
+    list="$(cd "$src" && find patches/dxvk -name '*.patch' | sort)"
+  fi
+  rm -rf "$out" && mkdir -p "$out"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    n=$((n + 1))
+    cp "$src/$path" "$out/$(printf '%02d' "$n").patch"
+  done <<<"$list"
+  rm -rf "$src"
+}
+
 same_commit() { [[ -n "$1" && -n "$2" && ( "$1" == "$2"* || "$2" == "$1"* ) ]]; }
 
 steam_roots() {

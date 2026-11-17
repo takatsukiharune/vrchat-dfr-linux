@@ -11,7 +11,7 @@
 #   --in-place         patch PROTON itself and keep its DLLs as d3d11.dll.stock and dxgi.dll.stock
 #   --refresh          copy PROTON again when it changed after <name>-dfr was made
 #   --dxvk-from PATH   directory or .zip with d3d11.dll and dxgi.dll
-#                      (default: the build in dist/ that matches PROTON's DXVK commit)
+#                      (default: the build in dist/ made for PROTON with `build --proton`)
 #   --force            install DLLs built from a different DXVK commit than PROTON ships
 #   --tools-dir DIR    where <name>-dfr goes (default: Steam's compatibilitytools.d)
 set -euo pipefail
@@ -62,13 +62,19 @@ else
 fi
 
 commit="$(proton_dxvk_commit "$origin" 2>/dev/null || proton_dxvk_commit "$dest" 2>/dev/null || true)"
+variant="$(proton_variant "$origin")"
+# A build for this Proton release carries its DXVK patches and names it.
+for_this_proton() {
+  if [[ -n "$variant" ]]; then [[ "$1" == *"-$variant-dfr."* ]]; else [[ "$1" =~ -g[0-9a-f]+-dfr\. ]]; fi
+}
 
 if [[ -z "$dxvk_from" ]]; then
   for dir in "$repo_dir"/dist/dxvk*/; do
     [[ -f "$dir/d3d11.dll" && -f "$dir/dxgi.dll" ]] || continue
-    if same_commit "$commit" "$(version_commit "$(dll_dxvk_version "$dir/d3d11.dll")")"; then dxvk_from="${dir%/}"; break; fi
+    version="$(dll_dxvk_version "$dir/d3d11.dll")"
+    if same_commit "$commit" "$(version_commit "$version")" && for_this_proton "$version"; then dxvk_from="${dir%/}"; break; fi
   done
-  [[ -n "$dxvk_from" ]] || die "No build in $repo_dir/dist matches DXVK ${commit:-of this Proton build}.
+  [[ -n "$dxvk_from" ]] || die "No build in $repo_dir/dist was made for ${variant:-DXVK ${commit:-of this Proton build}}.
 Build it with: scripts/dev-container.sh build --proton '$origin'"
 fi
 
@@ -95,6 +101,7 @@ Build matching DLLs with: scripts/dev-container.sh build --proton '$origin'
 or pass --force to install these."
   echo "$message Installing them because of --force."
 fi
+for_this_proton "$new_version" || echo "Note: these DLLs were not built with the DXVK patches of ${variant:-plain upstream DXVK}."
 
 install_dlls() {
   local target name

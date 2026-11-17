@@ -3,6 +3,9 @@
 #
 #   build-dxvk.sh                  the commit pinned by the dxvk submodule -> dist/dxvk
 #   build-dxvk.sh --proton DIR     the commit that Proton build ships      -> dist/dxvk-<version>
+#                                  GE-Proton and proton-cachyos patch DXVK themselves: their
+#                                  patches for that release go under the gaze patches.
+#                                  --plain leaves them out.
 #   build-dxvk.sh --ref REF        any upstream commit, tag or branch      -> dist/dxvk-<version>
 #
 # The submodule is only read. The build happens in a separate clone
@@ -13,12 +16,13 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_dir/scripts/lib.sh"
 work="${DXVK_WORK_DIR:-$repo_dir/.work/dxvk-build}"
 
-ref="" proton=""
+ref="" proton="" plain=0 variant=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ref) ref="${2:?--ref needs a value}"; shift 2 ;;
     --proton) proton="${2:?--proton needs a value}"; shift 2 ;;
-    *) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    --plain) plain=1; shift ;;
+    *) sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 
@@ -32,6 +36,7 @@ if [[ -n "$proton" ]]; then
     echo "Cannot tell which DXVK commit $proton ships. Pass --ref COMMIT." >&2
     exit 1
   }
+  (( plain )) || variant="$(proton_variant "$proton")"
 fi
 
 [[ -d "$work/.git" ]] || git clone -q --no-checkout "$repo_dir/dxvk" "$work"
@@ -57,12 +62,32 @@ export GIT_COMMITTER_NAME="vrchat-dfr-linux" GIT_COMMITTER_EMAIL="vrchat-dfr-lin
 export GIT_COMMITTER_DATE="2000-01-01T00:00:00Z"
 git am -q --abort 2>/dev/null || true
 git checkout -q -f --detach "$base"
+git clean -q -fd -e '/build-*'
+# Before any commit is made here, or `git add` would record stale submodules.
+git submodule update -q --init --recursive
+if [[ -n "$variant" ]]; then
+  fetch_variant_patches "$variant" "$work/.git/variant-patches" || {
+    echo "Cannot fetch the DXVK patches of $variant. Pass --plain to build without them." >&2
+    exit 1
+  }
+  for patch in "$work"/.git/variant-patches/*.patch; do
+    [[ -e "$patch" ]] || continue
+    patch -s -Np1 --no-backup-if-mismatch -i "$patch" || {
+      echo "A DXVK patch of $variant does not apply to DXVK $base_version." >&2
+      exit 1
+    }
+  done
+  git add -A
+  git -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL" \
+    commit -q --allow-empty --date="$GIT_COMMITTER_DATE" -m "DXVK patches of $variant"
+  base_version+="-$variant"
+fi
 if ! git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch; then
   git am -q --abort || true
+  git checkout -q -f --detach "$base"
   echo "patches/dxvk does not apply to DXVK $base_version." >&2
   exit 1
 fi
-git submodule update -q --init --recursive
 
 # DXVK takes its version string from `git describe`. Tagging the patched commit
 # makes the DLL name its base commit and the revision of this repository.
@@ -72,7 +97,7 @@ git tag -l '*-dfr.*' | xargs -r git tag -d >/dev/null
 git tag -a -m "gaze VRS on $base_version" "$base_version-dfr.$revision"
 
 out_dir="${DXVK_OUTPUT_DIR:-$repo_dir/dist/dxvk}"
-[[ "$base" == "$pinned" || -n "${DXVK_OUTPUT_DIR:-}" ]] || out_dir="$repo_dir/dist/dxvk-$base_version"
+[[ ( "$base" == "$pinned" && -z "$variant" ) || -n "${DXVK_OUTPUT_DIR:-}" ]] || out_dir="$repo_dir/dist/dxvk-$base_version"
 build="build-${base:0:12}"
 setup_args=()
 [[ -f "$build/meson-private/coredata.dat" ]] && setup_args+=(--reconfigure)

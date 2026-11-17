@@ -11,14 +11,14 @@ tools="$STEAM_DIR/compatibilitytools.d"
 fails() { if "$@" >/dev/null 2>&1; then echo "expected failure: $*" >&2; exit 1; fi; }
 
 ge=f863776806824486d709fee16ea619c03e22def4 other=a78a467cadb22bee928904290cf8e7921b121851
-proton() {  # NAME COMMIT
+proton() {  # NAME COMMIT [RELEASE]
   local target="$tools/$1/files/lib/wine/dxvk/x86_64-windows"
   mkdir -p "$target"
   printf ' %s dxvk (v3.1.1-174-g%s)\n' "$2" "${2:0:9}" > "$target/../version"
   printf 'stock d3d11 v3.1.1-174-g%s-GE-Proton(dirty)\n' "${2:0:15}" > "$target/d3d11.dll"
   printf 'stock dxgi\n' > "$target/dxgi.dll"
   chmod 555 "$target"/*.dll
-  echo "$1 build 1" > "$tools/$1/version"
+  echo "1700000000 ${3:-plain-1}" > "$tools/$1/version"
 }
 build() {  # DIR COMMIT
   mkdir -p "$1"
@@ -45,10 +45,10 @@ mkdir "$dir/stock" && cp "$(dll "GE Test" d3d11.dll)" "$(dll "GE Test" dxgi.dll)
 fails "$install" --dxvk-from "$dir/stock" "GE Test"
 
 # A changed source needs --refresh; the copy is then made again.
-echo "GE Test build 2" > "$tools/GE Test/version"
+echo "1700000001 plain-2" > "$tools/GE Test/version"
 fails "$install" --dxvk-from "$dir/match" "GE Test"
 "$install" --refresh --dxvk-from "$dir/match" "GE Test" >/dev/null
-grep -q 'build 2' "$tools/GE-Test-dfr/version"
+grep -q 'plain-2' "$tools/GE-Test-dfr/version"
 
 # A directory this script did not make is never replaced or deleted.
 mkdir -p "$tools/Mine-dfr" && proton Mine "$ge"
@@ -76,6 +76,20 @@ cp "$dir/match/d3d11.dll" "$(dll Mine d3d11.dll).new" && mv -f "$(dll Mine d3d11
 "$install" --in-place --force --dxvk-from "$dir/mismatch" Mine >/dev/null
 [[ ! -e "$(dll Mine d3d11.dll.stock)" ]]
 fails "$uninstall" Mine
+
+# Without --dxvk-from, only a build made for that Proton release is picked from dist/.
+proton GE-Rel "$ge" GE-Proton11-12
+fake_repo="$dir/repo"
+mkdir -p "$fake_repo/scripts" && cp "$repo_dir"/scripts/{lib,install-dxvk}.sh "$fake_repo/scripts/"
+build "$fake_repo/dist/dxvk-plain" "$ge"
+fails bash "$fake_repo/scripts/install-dxvk.sh" GE-Rel
+mkdir -p "$fake_repo/dist/dxvk-ge"
+printf 'DXVK_GAZE_VRS v3.1.1-174-g%s-GE-Proton11-12-dfr.abc1234\n' "${ge:0:8}" > "$fake_repo/dist/dxvk-ge/d3d11.dll"
+echo dxgi > "$fake_repo/dist/dxvk-ge/dxgi.dll"
+bash "$fake_repo/scripts/install-dxvk.sh" GE-Rel >/dev/null
+grep -q 'GE-Proton11-12-dfr' "$(dll GE-Rel-dfr d3d11.dll)"
+note="$("$install" --dxvk-from "$dir/match" --in-place GE-Rel)"
+grep -q 'not built with the DXVK patches of GE-Proton11-12' <<<"$note"
 
 fails "$install" --dxvk-from "$dir/match" "No Such Proton"
 echo "install tests passed"
