@@ -2,7 +2,8 @@
 // Offscreen D3D11 probe for the DXVK gaze-VRS patch. Draws a per-pixel hash
 // into a side-by-side RGBA16F eye target and reports, per 8x8 tile, how
 // coarsely it was shaded: '0' = every pixel, 'h' = 2x1 or 1x2, '1' = 2x2,
-// '2' = 4x4 or coarser.
+// '2' = 4x4 or coarser. With a sixth argument "bench" it draws an expensive
+// pixel shader instead and reports the time per frame.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -22,17 +23,23 @@ float4 ps(float4 pos : SV_Position) : SV_Target {
   float2 p = floor(pos.xy);
   return float4(frac(p.x * 0.0173 + p.y * 0.2931), 0.0, 0.0, 1.0);
 }
+float4 ps_bench(float4 pos : SV_Position) : SV_Target {
+  float a = 0.0;
+  for (int i = 1; i <= 256; i++) a += sin(pos.x * 0.011 * i + a) * cos(pos.y * 0.013 * i);
+  return float4(frac(a), 0.0, 0.0, 1.0);
+}
 )";
 
 #define CHECK(call) do { HRESULT hr_ = (call); if (FAILED(hr_)) { \
   std::fprintf(stderr, "%s failed: 0x%08lx\n", #call, static_cast<unsigned long>(hr_)); return 1; } } while (0)
 
 int main(int argc, char** argv) {
-  if (argc < 5) { std::fprintf(stderr, "Usage: probe WIDTH HEIGHT SECONDS OUTPUT [SAMPLES]\n"); return 2; }
+  if (argc < 5) { std::fprintf(stderr, "Usage: probe WIDTH HEIGHT SECONDS OUTPUT [SAMPLES [bench]]\n"); return 2; }
   const UINT width = std::atoi(argv[1]), height = std::atoi(argv[2]);
   const double seconds = std::atof(argv[3]);
   const std::string output = argv[4];
   const UINT samples = argc > 5 ? std::atoi(argv[5]) : 1;
+  const bool bench = argc > 6 && std::string(argv[6]) == "bench";
 
   ID3D11Device* device = nullptr;
   ID3D11DeviceContext* context = nullptr;
@@ -57,7 +64,7 @@ int main(int argc, char** argv) {
 
   ID3DBlob *vsBlob = nullptr, *psBlob = nullptr, *errors = nullptr;
   if (FAILED(D3DCompile(shader, strlen(shader), "probe", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vsBlob, &errors))
-   || FAILED(D3DCompile(shader, strlen(shader), "probe", nullptr, nullptr, "ps", "ps_5_0", 0, 0, &psBlob, &errors))) {
+   || FAILED(D3DCompile(shader, strlen(shader), "probe", nullptr, nullptr, bench ? "ps_bench" : "ps", "ps_5_0", 0, 0, &psBlob, &errors))) {
     std::fprintf(stderr, "Shader compile failed: %s\n", errors ? static_cast<const char*>(errors->GetBufferPointer()) : "?");
     return 1;
   }
@@ -71,7 +78,40 @@ int main(int argc, char** argv) {
   const UINT tilesX = width / 8, tilesY = height / 8;
   std::string grid;
   std::vector<uint16_t> values(64);
-  const DWORD start = GetTickCount();
+  DWORD start = GetTickCount();
+
+  if (bench) {
+    // Reading one pixel back after each frame waits for the GPU, so the wall
+    // time per frame is the GPU time of the pass.
+    desc.Width = desc.Height = 1;
+    ID3D11Texture2D* pixel = nullptr;
+    CHECK(device->CreateTexture2D(&desc, nullptr, &pixel));
+    const D3D11_BOX box = {0, 0, 0, 1, 1, 1};
+    unsigned frames = 0;
+    const double warmup = 3.0;
+    for (bool measuring = false;; ++frames) {
+      const double elapsed = (GetTickCount() - start) / 1000.0;
+      if (!measuring && elapsed >= warmup) { measuring = true; frames = 0; start = GetTickCount(); }
+      else if (measuring && elapsed >= seconds) break;
+      context->OMSetRenderTargets(1, &rtv, nullptr);
+      context->RSSetViewports(1, &viewport);
+      context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      context->VSSetShader(vs, nullptr, 0);
+      context->PSSetShader(ps, nullptr, 0);
+      context->Draw(3, 0);
+      context->OMSetRenderTargets(0, nullptr, nullptr);
+      if (samples > 1) context->ResolveSubresource(resolved, 0, target, 0, desc.Format);
+      context->CopySubresourceRegion(pixel, 0, 0, 0, 0, samples > 1 ? resolved : target, 0, &box);
+      D3D11_MAPPED_SUBRESOURCE mapped = {};
+      CHECK(context->Map(pixel, 0, D3D11_MAP_READ, 0, &mapped));
+      context->Unmap(pixel, 0);
+    }
+    if (FILE* file = std::fopen(output.c_str(), "wb")) {
+      std::fprintf(file, "%u %.4f\n", frames, (GetTickCount() - start) / double(frames));
+      std::fclose(file);
+    }
+    return 0;
+  }
 
   for (unsigned frame = 1; (GetTickCount() - start) / 1000.0 < seconds; ++frame) {
     context->OMSetRenderTargets(1, &rtv, nullptr);

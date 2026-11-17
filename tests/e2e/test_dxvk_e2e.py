@@ -40,7 +40,7 @@ class Scenario:
             self.writer.wait()
             self.writer = None
 
-    def start_probe(self, env_extra, seconds=120):
+    def start_probe(self, env_extra, seconds=120, size=(WIDTH, HEIGHT), mode=()):
         for name in ("d3d11.dll", "dxgi.dll"):
             shutil.copy(Path(self.args.dxvk) / name, self.work / name)
         shutil.copy(self.args.probe, self.work / "probe.exe")
@@ -53,8 +53,8 @@ class Scenario:
             env.update(VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation",
                        VK_KHRONOS_VALIDATION_LOG_FILENAME=str(self.work / "validation.log"))
         self.probe = subprocess.Popen(
-            ["wine", "probe.exe", str(WIDTH), str(HEIGHT), str(seconds),
-             "Z:" + str(self.grid_path).replace("/", "\\"), str(self.samples)],
+            ["wine", "probe.exe", str(size[0]), str(size[1]), str(seconds),
+             "Z:" + str(self.grid_path).replace("/", "\\"), str(self.samples), *mode],
             cwd=self.work, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def stop(self):
@@ -236,6 +236,31 @@ def run_baseline(args, work, validate):
         s.stop()
 
 
+def run_bench(args, root):
+    """Time per frame of an expensive pixel shader at an HMD-sized target, VRS off and on."""
+    width, height = map(int, args.bench_size.split("x"))
+    env = dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FAKE="fixed", DXVK_GAZE_COARSE="auto")
+    cases = [("VRS off", {})]
+    for spec in args.bench:
+        full, mid_area, mid = (spec.split(",") + ["2x2"])[:3]
+        cases.append((f"full_area={full} mid_area={mid_area} mid={mid}",
+                      dict(env, DXVK_GAZE_FULL_AREA=full, DXVK_GAZE_MID_AREA=mid_area, DXVK_GAZE_MID=mid)))
+    print(f"{width}x{height} side by side, {args.samples} sample(s), {args.bench_seconds:g} s per case")
+    baseline = None
+    for index, (name, case_env) in enumerate(cases):
+        work = root / f"bench{index}"
+        work.mkdir(parents=True)
+        s = Scenario(args, work, args.samples)
+        s.start_probe(case_env, args.bench_seconds, (width, height), ("bench",))
+        try:
+            s.probe.wait(timeout=args.bench_seconds + 90)
+        finally:
+            s.stop()
+        frames, ms = s.grid_path.read_text().split()
+        baseline = baseline or float(ms)
+        print(f"  {name:<44} {float(ms):7.2f} ms/frame  {float(ms) / baseline:6.1%} of VRS off  ({frames} frames)")
+
+
 def vuids(work):
     path = work / "validation.log"
     return set(re.findall(r"VUID-[\w-]+", path.read_text(errors="replace"))) if path.exists() else set()
@@ -248,6 +273,11 @@ def main():
     parser.add_argument("--writer", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--no-validate", action="store_true")
+    parser.add_argument("--bench", nargs="*", metavar="FULL,MID_AREA[,MID]",
+                        help="measure instead of test; default cases: 45,65 and 45,65,2x1")
+    parser.add_argument("--bench-size", default="4128x2208")
+    parser.add_argument("--bench-seconds", type=float, default=8.0)
+    parser.add_argument("--samples", type=int, default=1)
     args = parser.parse_args()
     validate = not args.no_validate
     root = Path(args.work)
@@ -257,6 +287,10 @@ def main():
         path = root / name
         path.mkdir(parents=True)
         return path
+
+    if args.bench is not None:
+        args.bench = args.bench or ["45,65", "45,65,2x1"]
+        return run_bench(args, root)
 
     print("baseline (VRS off):")
     baseline = directory("baseline")
