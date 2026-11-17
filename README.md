@@ -264,7 +264,9 @@ Each command runs in a new container that is deleted afterwards.
 ```bash
 bash scripts/dev-container.sh all                   # build + every test; results land in dist/
 bash scripts/dev-container.sh build --proton NAME   # DXVK for the commit that Proton build ships
+bash scripts/dev-container.sh build --variant GE-Proton11-12   # the same by release name, without a local Proton build
 bash scripts/dev-container.sh build --ref v3.1.1    # DXVK for any upstream commit, tag or branch
+bash scripts/dev-container.sh check master GE-Proton11-12   # do the patches apply there?
 bash scripts/dev-container.sh e2e --bench           # time per frame with VRS off and on
 bash scripts/dev-container.sh rm                    # delete the images and the work volume
 ```
@@ -294,7 +296,7 @@ To change the DXVK code:
 bash scripts/dxvk-patches.sh apply    # dxvk/ on branch dfr: pinned commit + patches
 # edit and commit in dxvk/
 bash scripts/dxvk-patches.sh export   # rewrite patches/dxvk from those commits
-bash scripts/dxvk-patches.sh check master   # do the patches still apply to upstream?
+bash scripts/dev-container.sh check master  # do the patches still apply to upstream?
 ```
 
 A DLL's version string names its base commit and this repository's revision,

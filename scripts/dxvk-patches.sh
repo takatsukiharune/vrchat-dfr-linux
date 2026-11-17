@@ -3,7 +3,9 @@
 #
 #   dxvk-patches.sh apply          check out branch dfr in the submodule: pinned commit + patches
 #   dxvk-patches.sh export         rewrite patches/dxvk from the commits on top of the pinned commit
-#   dxvk-patches.sh check [REF..]  test that the patches apply to each REF (default: the pinned commit)
+#   dxvk-patches.sh check [REF..]  test that the patches apply to each REF (default: the pinned commit).
+#                                  REF is a DXVK commit, tag or branch, or a GE-Proton or
+#                                  proton-cachyos release name: then on top of its DXVK patches.
 #
 # To change the DXVK code: apply, edit and commit in dxvk/, export, commit patches/dxvk.
 set -euo pipefail
@@ -40,21 +42,38 @@ case "${1:-}" in
     git clone -q --no-checkout "$sub" "$scratch/dxvk"
     cd "$scratch/dxvk"
     failed=0
-    for ref in "${@:-$pinned}"; do
+    for target in "${@:-$pinned}"; do
+      ref="$target" variant=""
+      case "$target" in
+        GE-Proton*|cachyos-*)
+          fetch_variant_patches "$target" "$scratch/variant" || { echo "FETCH     $target"; failed=1; continue; }
+          ref="$(cat "$scratch/variant/commit")" variant="$target" ;;
+      esac
       if ! git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
         git fetch -q "$dxvk_upstream_url" "+$ref:refs/check/target"
         ref=refs/check/target
       fi
       git checkout -q -f --detach "$ref"
+      git clean -q -fd
+      label="$(git rev-parse --short HEAD)"
+      if [[ -n "$variant" ]]; then
+        label+=" + $target"
+        for patch in "$scratch"/variant/*.patch; do
+          patch -s -Np1 --no-backup-if-mismatch -i "$patch" >/dev/null || { echo "VARIANT   $label: its own patch $(basename "$patch") fails"; failed=1; continue 2; }
+        done
+        git add -A
+        git -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL" \
+          commit -q --allow-empty -m "DXVK patches of $target"
+      fi
       if git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch >/dev/null 2>&1; then
-        echo "ok        $(git rev-parse --short "$ref")"
+        echo "ok        $label"
       else
-        echo "CONFLICT  $(git rev-parse --short "$ref"): $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+        echo "CONFLICT  $label: $(git diff --name-only --diff-filter=U | tr '\n' ' ')"
         git am -q --abort
         failed=1
       fi
     done
     exit "$failed"
     ;;
-  *) sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  *) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac

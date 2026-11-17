@@ -8,6 +8,11 @@ on:
         required: false
         default: ''
         type: string
+      variant:
+        description: 'Or: a GE-Proton or proton-cachyos release (e.g. GE-Proton11-12) to build for, with its DXVK patches'
+        required: false
+        default: ''
+        type: string
       release_tag:
         description: 'Optional: create a GitHub Release with this tag (e.g. v1.0-gaze-vrs)'
         required: false
@@ -31,7 +36,8 @@ jobs:
       - name: Build
         env:
           DXVK_REF: ${{ inputs.dxvk_ref }}
-        run: bash scripts/dev-container.sh build ${DXVK_REF:+--ref "$DXVK_REF"}
+          VARIANT: ${{ inputs.variant }}
+        run: bash scripts/dev-container.sh build ${DXVK_REF:+--ref "$DXVK_REF"} ${VARIANT:+--variant "$VARIANT"}
 
       - name: Collect DLLs
         run: |
@@ -106,7 +112,7 @@ jobs:
           body: |
             Experimental gaze-driven VRS build.
 
-            - DXVK base: `${{ inputs.dxvk_ref || 'the commit pinned by the dxvk submodule' }}`
+            - DXVK base: `${{ inputs.variant || inputs.dxvk_ref || 'the commit pinned by the dxvk submodule' }}`
             - Gaze: native Linux OpenXR headless bridge for an unmodified OpenXR runtime
 
             See README for install and VRChat launch configuration.

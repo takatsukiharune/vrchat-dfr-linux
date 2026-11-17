@@ -42,7 +42,7 @@ proton_variant() {
 }
 
 # Writes the DXVK patches of that release into DIR as 01.patch, 02.patch, ...
-# in the order its own build applies them.
+# in the order its own build applies them, and the DXVK commit it pins as DIR/commit.
 fetch_variant_patches() {  # VARIANT DIR
   local variant="$1" out="$2" url list src n=0 path
   case "$variant" in
@@ -61,12 +61,20 @@ fetch_variant_patches() {  # VARIANT DIR
     list="$(cd "$src" && find patches/dxvk -name '*.patch' | sort)"
   fi
   rm -rf "$out" && mkdir -p "$out"
+  git -C "$src" ls-tree HEAD dxvk | awk '{ print $3 }' > "$out/commit"
   while IFS= read -r path; do
     [[ -n "$path" ]] || continue
     n=$((n + 1))
     cp "$src/$path" "$out/$(printf '%02d' "$n").patch"
   done <<<"$list"
   rm -rf "$src"
+}
+
+# Newest release tag of a variant: latest_variant 'GE-Proton*' or 'cachyos-*-slr'.
+latest_variant() {
+  local url="https://github.com/GloriousEggroll/proton-ge-custom.git"
+  [[ "$1" == cachyos-* ]] && url="https://github.com/CachyOS/proton-cachyos.git"
+  git ls-remote --tags --refs --sort=-v:refname "$url" "$1" | head -n1 | sed 's|.*refs/tags/||'
 }
 
 same_commit() { [[ -n "$1" && -n "$2" && ( "$1" == "$2"* || "$2" == "$1"* ) ]]; }

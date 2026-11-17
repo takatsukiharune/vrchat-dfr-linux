@@ -4,9 +4,11 @@
 # the Wine prefix live in the volume vrchat-dfr-work. The GPU render node is
 # passed through for the end-to-end test only.
 #
-#   scripts/dev-container.sh build [--proton DIR | --ref REF]
+#   scripts/dev-container.sh build [--proton DIR | --variant NAME | --ref REF]
 #                                     DXVK DLLs for the pinned commit, a Proton build or
 #                                     any DXVK commit, and dist/gaze/*
+#   scripts/dev-container.sh check [REF..]
+#                                     do the patches apply? See scripts/dxvk-patches.sh
 #   scripts/dev-container.sh test     unit and bridge tests (no GPU needed)
 #   scripts/dev-container.sh e2e      DXVK end-to-end test under Wine (needs /dev/dri)
 #   scripts/dev-container.sh all      build, test and e2e
@@ -61,6 +63,7 @@ case "${1:-}" in
       run build "$build"
     fi
     ;;
+  check) shift; run build "bash scripts/dxvk-patches.sh check $*" ;;
   test)  run build "bash scripts/test-gaze-bridge.sh" ;;
   e2e)   shift; run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh $*" ;;
   all)   run build "$build && bash scripts/test-gaze-bridge.sh"
@@ -72,5 +75,5 @@ case "${1:-}" in
     "$engine" volume rm -f "$volume" >/dev/null
     echo "Removed the vrchat-dfr images and volume"
     ;;
-  *) sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
