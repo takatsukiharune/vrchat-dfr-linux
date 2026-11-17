@@ -4,6 +4,7 @@
 import argparse
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -131,14 +132,20 @@ def parse_vdf(text):
     return block()
 
 
-def find_block(pairs, name):
+def blocks(pairs, name):
+    """Every block called `name`, at any depth. VDF keys ignore case."""
     for key, value in pairs:
         if isinstance(value, list):
             if key.lower() == name.lower():
-                return value
-            if (found := find_block(value, name)) is not None:
-                return found
-    return None
+                yield value
+            yield from blocks(value, name)
+
+
+def child(pairs, name, kind):
+    """The value of the first pair called `name` when it is a `kind`, str or list
+    for a block, else an empty one."""
+    value = next((value for key, value in pairs if key.lower() == name.lower()), None)
+    return value if isinstance(value, kind) else kind()
 
 
 def internal_name(proton):
@@ -147,7 +154,7 @@ def internal_name(proton):
     its directory name stands in."""
     manifest = proton / "compatibilitytool.vdf"
     if manifest.is_file():
-        tools = find_block(parse_vdf(manifest.read_text(errors="replace")), "compat_tools")
+        tools = next(blocks(parse_vdf(manifest.read_text(errors="replace")), "compat_tools"), None)
         if tools:
             return tools[0][0]
     return proton.name
@@ -399,6 +406,121 @@ def uninstall(args):
     print(f"Proton's own DXVK is back in {proton}.")
 
 
+def read_vdf(path):
+    return parse_vdf(path.read_text(errors="replace")) if path.is_file() else []
+
+
+def launch_environment(options):
+    """The environment Steam's launch options give the game: the shell words
+    before %command%, as assignments up to the first command word, or after
+    `env`. Without %command% the options are game arguments and set nothing."""
+    try:
+        words = shlex.split(options)
+    except ValueError:
+        return {}
+    if "%command%" not in words:
+        return {}
+    env, assigning = {}, True
+    for word in words[:words.index("%command%")]:
+        name, eq, value = word.partition("=")
+        if eq and re.fullmatch(r"\w+", name, re.ASCII):
+            if assigning:
+                env[name] = value
+        elif word == "env":
+            assigning = True
+        else:
+            assigning = False
+    return env
+
+
+def find_tool(steam, name):
+    """The Proton build Steam calls `name`: a tool in compatibilitytools.d that
+    declares it, or Valve's Proton in steamapps/common."""
+    # proton_experimental, proton_hotfix, proton_9: "Proton - Experimental", "Proton Hotfix", "Proton 9.0..."
+    folder = {"proton_experimental": "Proton - Experimental", "proton_hotfix": "Proton Hotfix"}.get(name)
+    if not folder and name.startswith("proton_"):
+        folder = f"Proton {name[len('proton_'):]}.0"
+    for proton in proton_installs():
+        if proton.parent == steam / "compatibilitytools.d" and internal_name(proton) == name:
+            return proton
+        if proton.parent == steam / "steamapps/common" and folder and proton.name.startswith(folder):
+            return proton
+    return None
+
+
+def doctor(args):
+    """Checks the Proton build and the launch options Steam uses for a game."""
+    problems = 0
+
+    def bad(message):
+        nonlocal problems
+        problems += 1
+        print(f"  !! {message}")
+
+    app = args.app
+    roots = [steam for steam in steam_roots() if (steam / "config/config.vdf").is_file()]
+    if not roots:
+        bad("no Steam configuration found; set STEAM_DIR")
+    for steam in roots:
+        print(f"Steam:  {steam}")
+        mapping = next(blocks(read_vdf(steam / "config/config.vdf"), "CompatToolMapping"), [])
+        # A game without a tool of its own uses Steam's default, stored as app 0.
+        name = child(child(mapping, app, list), "name", str) or child(child(mapping, "0", list), "name", str)
+        tool = find_tool(steam, name) if name else None
+        if not name:
+            bad(f"app {app} has no compatibility tool selected; select a patched one in its Steam properties")
+        elif not tool:
+            bad(f"app {app} uses '{name}', which is not in compatibilitytools.d; scripts/proton.py install makes a patched copy")
+        else:
+            dll = dxvk_dir(tool) / "d3d11.dll"
+            version, commit, release, patched = dll_version(dll), dxvk_commit(tool), variant(tool), is_patched(dll)
+            if not patched:
+                bad(f"app {app} uses '{name}' with stock DXVK {version}; run scripts/proton.py install")
+            elif not same_commit(commit, version_commit(version)):
+                bad(f"'{name}' has gaze DXVK {version}, but this Proton build ships DXVK commit {commit[:12]}; "
+                    "build with --proton and reinstall")
+            else:
+                print(f"  ok app {app} uses '{name}' with gaze DXVK {version}")
+            # GE-Proton and proton-cachyos patch DXVK; a build for them names the release.
+            if patched and release and not made_for(version, release):
+                bad(f"this DXVK lacks the DXVK patches of {release}; build with --proton and reinstall")
+            # A copy whose source is gone keeps working; one whose source changed is behind.
+            source = copy_source(tool)
+            if source and source.is_dir() and not same_version(source, tool):
+                bad(f"{source} changed after this copy was made; run scripts/proton.py install --refresh '{tool.name}'")
+
+        userdata = steam / "userdata"
+        options = []
+        for user in sorted(userdata.iterdir()) if userdata.is_dir() else []:
+            for apps in blocks(read_vdf(user / "config/localconfig.vdf"), "apps"):
+                if launch := child(child(apps, app, list), "LaunchOptions", str):
+                    options.append(launch)
+                    break
+        if not options:
+            bad(f"no launch options set for app {app}; see 'dfrctl launch-options'")
+        for env in map(launch_environment, options):
+            gaze_file = env.get("DXVK_GAZE_FILE", "")
+            if env.get("DXVK_GAZE_VRS") != "1":
+                bad("launch options lack DXVK_GAZE_VRS=1 before %command%; see 'dfrctl launch-options'")
+            elif env.get("DXVK_GAZE_CONFIG") != args.config:
+                bad(f"launch options do not point DXVK_GAZE_CONFIG at {args.config}; live tuning and status are off")
+            elif gaze_file and gaze_file != args.gaze_file:
+                bad(f"launch options use gaze file {gaze_file}, but dfrctl status reads {args.gaze_file}")
+            else:
+                print("  ok launch options enable gaze VRS with this config file")
+    print(f"Problems found: {problems}" if problems else "No problems found.")
+    if problems:
+        sys.exit(1)
+
+
+def default_config():
+    """dfrctl's config file, the one the launch options must name."""
+    if os.environ.get("DFR_CONFIG"):
+        return os.environ["DFR_CONFIG"]
+    config_home = os.environ.get("XDG_CONFIG_HOME") or f"{os.environ.get('HOME', '')}/.config"
+    return f"{config_home}/vrchat-dfr/dfr.conf"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -420,6 +542,14 @@ def main():
     command = commands.add_parser("uninstall", help="undo install", description=UNINSTALL_HELP, formatter_class=raw)
     command.add_argument("proton", metavar="PROTON", help=proton_help)
 
+    command = commands.add_parser("doctor", help="check the Proton build and the launch options of a Steam game")
+    command.add_argument("--config", metavar="PATH", default=default_config(),
+                         help="the config file the launch options must name (default: dfrctl's)")
+    command.add_argument("--gaze-file", metavar="PATH",
+                         default=os.environ.get("DFR_GAZE_FILE") or "/dev/shm/vrchat_dfr_gaze",
+                         help="the gaze file dfrctl status reads")
+    command.add_argument("app", metavar="APPID", nargs="?", default="438100", help="the Steam app (default: 438100, VRChat)")
+
     command = commands.add_parser("resolve", help="print the directory of a Proton build")
     command.add_argument("proton", metavar="PROTON", help=proton_help)
     command = commands.add_parser("commit", help="print the DXVK commit a Proton build ships; fails when unknown")
@@ -436,6 +566,8 @@ def main():
         install(args)
     elif args.command == "uninstall":
         uninstall(args)
+    elif args.command == "doctor":
+        doctor(args)
     elif args.command == "resolve":
         print(resolve(args.proton))
     elif args.command == "commit":

@@ -5,16 +5,12 @@
 #include "../shared/gaze_config.h"
 #include "../shared/gaze_shm.h"
 
-#include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <sstream>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -32,11 +28,10 @@ const char* const usage =
   "  on | off                 enable or disable foveation without restarting the game\n"
   "  reset                    delete the config file\n"
   "  status [--watch]         what DXVK and the gaze bridge are doing right now\n"
-  "  doctor [APPID]           check the whole setup for a Steam game (default 438100, VRChat)\n"
   "  keys                     list the settings\n"
   "  launch-options           print the Steam launch options that use this config file\n"
   "Config: $DFR_CONFIG, else ~/.config/vrchat-dfr/dfr.conf. Gaze file: $DFR_GAZE_FILE,\n"
-  "else /dev/shm/vrchat_dfr_gaze. Steam: $STEAM_DIR, else the usual places under $HOME.\n";
+  "else /dev/shm/vrchat_dfr_gaze.\n";
 
 const char* const keys =
   "enabled      0|1          foveation on/off\n"
@@ -143,9 +138,8 @@ void set(std::vector<std::string>& content, const std::string& rawKey, const std
   if (!replaced) content.push_back(line);
 }
 
-// Whether the game and the bridge are running. With `problems`, a stopped
-// bridge counts as one; a stopped game does not.
-int status(const std::string& config, const std::string& gazeFile, int* problems = nullptr) {
+// Whether the game and the bridge are running.
+int status(const std::string& config, const std::string& gazeFile) {
   const std::string path = config + ".status";
   struct stat info {};
   std::string text;
@@ -165,7 +159,6 @@ int status(const std::string& config, const std::string& gazeFile, int* problems
   if (fd < 0 || fstat(fd, &gazeInfo) || gazeInfo.st_size != sizeof(gaze_bridge::SharedGaze)) {
     std::cout << "Bridge: no gaze file at " << gazeFile << " (openxr-gaze-bridge not started)\n";
     if (fd >= 0) close(fd);
-    if (problems) ++*problems;
     return 0;
   }
   void* mapped = mmap(nullptr, sizeof(gaze_bridge::SharedGaze), PROT_READ, MAP_SHARED, fd, 0);
@@ -180,270 +173,12 @@ int status(const std::string& config, const std::string& gazeFile, int* problems
   munmap(mapped, sizeof(gaze_bridge::SharedGaze));
   if (!ok0 || !ok1 || sequence0 == sequence1) {
     std::cout << "Bridge: not running (gaze file is not being updated)\n";
-    if (problems) ++*problems;
   } else if (!second.valid)
     std::cout << "Bridge: running, no valid gaze (headset off, not worn, or eye tracking disabled)\n";
   else
     std::printf("Bridge: running, gaze L=(%.3f, %.3f) R=(%.3f, %.3f)\n",
       second.u[0], second.v[0], second.u[1], second.v[1]);
   return 0;
-}
-namespace fs = std::filesystem;
-
-// Steam's text VDF: "key" "value" pairs and "key" { ... } blocks, // comments.
-struct Vdf {
-  std::string key, value;
-  std::vector<Vdf> children;
-
-  static bool same(const std::string& a, const std::string& b) {
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
-      [](char x, char y) { return std::tolower(uint8_t(x)) == std::tolower(uint8_t(y)); });
-  }
-  const Vdf* child(const std::string& name) const {
-    for (const auto& c : children) if (same(c.key, name)) return &c;
-    return nullptr;
-  }
-  std::string get(const std::string& name) const {
-    const Vdf* c = child(name);
-    return c ? c->value : "";
-  }
-  // Every block called `name`, at any depth.
-  void findAll(const std::string& name, std::vector<const Vdf*>& out) const {
-    for (const auto& c : children) {
-      if (same(c.key, name) && !c.children.empty()) out.push_back(&c);
-      c.findAll(name, out);
-    }
-  }
-  const Vdf* find(const std::string& name) const {
-    std::vector<const Vdf*> all;
-    findAll(name, all);
-    return all.empty() ? nullptr : all.front();
-  }
-
-  static Vdf parse(const std::string& text) {
-    size_t i = 0;
-    Vdf root;
-    root.children = parseBlock(text, i);
-    return root;
-  }
-
- private:
-  static bool token(const std::string& t, size_t& i, std::string& out) {
-    for (;;) {
-      while (i < t.size() && std::isspace(uint8_t(t[i]))) ++i;
-      if (t.compare(i, 2, "//")) break;
-      i = t.find('\n', i);
-      if (i == std::string::npos) i = t.size();
-    }
-    if (i >= t.size()) return false;
-    out.clear();
-    if (t[i] == '{' || t[i] == '}') { out = t[i++]; return true; }
-    if (t[i] != '"') {
-      while (i < t.size() && !std::isspace(uint8_t(t[i])) && t[i] != '{' && t[i] != '}') out += t[i++];
-      return true;
-    }
-    for (++i; i < t.size() && t[i] != '"'; ++i) {
-      if (t[i] == '\\' && i + 1 < t.size()) {
-        const char e = t[++i];
-        out += e == 'n' ? '\n' : e == 't' ? '\t' : e;
-      } else {
-        out += t[i];
-      }
-    }
-    ++i;
-    out.insert(out.begin(), '"');  // marks a string, so a quoted "{" is not a brace
-    return true;
-  }
-  static std::vector<Vdf> parseBlock(const std::string& t, size_t& i) {
-    std::vector<Vdf> nodes;
-    std::string key, next;
-    while (token(t, i, key) && key != "}") {
-      if (key == "{" || !token(t, i, next) || next == "}") break;
-      Vdf node;
-      node.key = key[0] == '"' ? key.substr(1) : key;
-      if (next == "{") node.children = parseBlock(t, i);
-      else node.value = next[0] == '"' ? next.substr(1) : next;
-      nodes.push_back(std::move(node));
-    }
-    return nodes;
-  }
-};
-
-Vdf readVdf(const fs::path& path) {
-  std::string text;
-  readFile(path.string(), text);
-  return Vdf::parse(text);
-}
-
-// The environment Steam's launch options give the game: the shell words before
-// %command%, as assignments up to the first command word, or after `env`.
-// Without %command% the options are game arguments and set nothing.
-std::map<std::string, std::string> launchEnvironment(const std::string& options) {
-  std::vector<std::string> words;
-  std::string word;
-  bool inWord = false;
-  for (size_t i = 0; i < options.size(); ++i) {
-    const char c = options[i];
-    if (c == '\'' || c == '"') {
-      const size_t end = options.find(c, i + 1);
-      word += options.substr(i + 1, end == std::string::npos ? std::string::npos : end - i - 1);
-      i = end == std::string::npos ? options.size() : end;
-      inWord = true;
-    } else if (c == '\\' && i + 1 < options.size()) {
-      word += options[++i];
-      inWord = true;
-    } else if (std::isspace(uint8_t(c))) {
-      if (inWord) words.push_back(word);
-      word.clear();
-      inWord = false;
-    } else {
-      word += c;
-      inWord = true;
-    }
-  }
-  if (inWord) words.push_back(word);
-
-  std::map<std::string, std::string> env;
-  const auto command = std::find(words.begin(), words.end(), "%command%");
-  if (command == words.end()) return env;
-  bool assigning = true;
-  for (auto it = words.begin(); it != command; ++it) {
-    const size_t eq = it->find('=');
-    const bool assignment = eq != std::string::npos && eq > 0
-      && std::all_of(it->begin(), it->begin() + eq, [](char c) { return std::isalnum(uint8_t(c)) || c == '_'; });
-    if (assignment && assigning) env[it->substr(0, eq)] = it->substr(eq + 1);
-    else if (*it == "env") assigning = true;
-    else if (!assignment) assigning = false;
-  }
-  return env;
-}
-
-// The `git describe` string DXVK embeds, e.g. v3.1.1-174-gf8637768-dfr.90f053c.
-std::string dxvkVersion(const std::string& dll) {
-  auto digits = [&](size_t& i) { const size_t start = i; while (i < dll.size() && std::isdigit(uint8_t(dll[i]))) ++i; return i > start; };
-  for (size_t at = dll.find('v'); at != std::string::npos; at = dll.find('v', at + 1)) {
-    size_t i = at + 1;
-    if (!digits(i) || dll[i++] != '.' || !digits(i)) continue;
-    if (dll[i] == '.' && !digits(++i)) continue;
-    if (dll[i++] != '-' || !digits(i) || dll.compare(i, 2, "-g")) continue;
-    const size_t hash = i += 2;
-    while (i < dll.size() && std::isxdigit(uint8_t(dll[i]))) ++i;
-    if (i - hash < 7) continue;
-    while (i < dll.size() && (std::isalnum(uint8_t(dll[i])) || (dll[i] && std::strchr("-+.()", dll[i])))) ++i;
-    return dll.substr(at, i - at);
-  }
-  return "";
-}
-
-std::string firstLine(const fs::path& path) {
-  std::string text;
-  readFile(path.string(), text);
-  return text.substr(0, text.find('\n'));
-}
-
-// Directory of the compatibility tool Steam calls `name`: a tool in
-// compatibilitytools.d that declares it, or Valve's Proton in steamapps/common.
-fs::path findTool(const fs::path& steam, const std::string& name) {
-  std::error_code ignored;
-  for (const auto& entry : fs::directory_iterator(steam / "compatibilitytools.d", ignored)) {
-    const Vdf manifest = readVdf(entry.path() / "compatibilitytool.vdf");
-    const Vdf* tools = manifest.find("compat_tools");
-    if ((tools && tools->child(name)) || entry.path().filename() == name) return entry.path();
-  }
-  // proton_experimental, proton_hotfix, proton_9 -> "Proton - Experimental", "Proton Hotfix", "Proton 9.0..."
-  std::string folder;
-  if (name == "proton_experimental") folder = "Proton - Experimental";
-  else if (name == "proton_hotfix") folder = "Proton Hotfix";
-  else if (name.rfind("proton_", 0) == 0) folder = "Proton " + name.substr(7) + ".0";
-  for (const auto& entry : fs::directory_iterator(steam / "steamapps/common", ignored)) {
-    const std::string dir = entry.path().filename().string();
-    if (!folder.empty() && dir.rfind(folder, 0) == 0
-        && fs::exists(entry.path() / "files/lib/wine/dxvk/x86_64-windows/d3d11.dll", ignored)) return entry.path();
-  }
-  return {};
-}
-
-int doctor(const std::string& config, const std::string& gazeFile, const std::string& app) {
-  int problems = 0;
-  auto bad = [&](const std::string& message) { std::cout << "  !! " << message << "\n"; ++problems; };
-  auto good = [](const std::string& message) { std::cout << "  ok " << message << "\n"; };
-
-  std::vector<fs::path> roots;
-  const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "";
-  for (const std::string& root : { std::string(std::getenv("STEAM_DIR") ? std::getenv("STEAM_DIR") : ""),
-      home + "/.local/share/Steam", home + "/.steam/steam", home + "/.var/app/com.valvesoftware.Steam/.local/share/Steam" }) {
-    std::error_code error;
-    const fs::path real = fs::canonical(root, error);
-    if (!root.empty() && !error && std::find(roots.begin(), roots.end(), real) == roots.end()) roots.push_back(real);
-  }
-
-  bool any = false;
-  for (const auto& steam : roots) {
-    // A Steam directory without a configuration is not one Steam runs from.
-    if (!fs::exists(steam / "config/config.vdf")) continue;
-    any = true;
-    std::cout << "Steam:  " << steam.string() << "\n";
-    const Vdf steamConfig = readVdf(steam / "config/config.vdf");
-    const Vdf* mapping = steamConfig.find("CompatToolMapping");
-    std::string name;
-    // A game without a tool of its own uses Steam's default, stored as app 0.
-    for (const std::string& id : { app, std::string("0") })
-      if (const Vdf* entry = mapping ? mapping->child(id) : nullptr; name.empty() && entry) name = entry->get("name");
-    const fs::path tool = name.empty() ? fs::path() : findTool(steam, name);
-    if (name.empty()) {
-      bad("app " + app + " has no compatibility tool selected; select a patched one in its Steam properties");
-    } else if (tool.empty()) {
-      bad("app " + app + " uses '" + name + "', which is not in compatibilitytools.d; scripts/proton.py install makes a patched copy");
-    } else {
-      const fs::path dxvk = tool / "files/lib/wine/dxvk";
-      std::string dll;
-      readFile((dxvk / "x86_64-windows/d3d11.dll").string(), dll);
-      const std::string version = dxvkVersion(dll), shipped = firstLine(dxvk / "version");
-      const size_t hash = version.find("-g");
-      const size_t hashEnd = hash == std::string::npos ? hash : version.find_first_not_of("0123456789abcdef", hash + 2);
-      const std::string commit = hash == std::string::npos ? "" : version.substr(hash + 2, hashEnd - hash - 2);
-      if (dll.find("DXVK_GAZE_VRS") == std::string::npos)
-        bad("app " + app + " uses '" + name + "' with stock DXVK " + version + "; run scripts/proton.py install");
-      else if (commit.empty() || shipped.find(commit) == std::string::npos)
-        bad("'" + name + "' has gaze DXVK " + version + ", but this Proton build ships" + shipped + "; build with --proton and reinstall");
-      else
-        good("app " + app + " uses '" + name + "' with gaze DXVK " + version);
-      // GE-Proton and proton-cachyos patch DXVK; a build for them names the release.
-      std::string release = firstLine(tool / "version");
-      release.erase(0, release.find(' ') + 1);
-      if (dll.find("DXVK_GAZE_VRS") != std::string::npos && version.find("-" + release + "-dfr.") == std::string::npos
-          && (release.rfind("GE-Proton", 0) == 0 || release.rfind("cachyos-", 0) == 0))
-        bad("this DXVK lacks the DXVK patches of " + release + "; build with --proton and reinstall");
-      // A copy whose source is gone keeps working; one whose source changed is behind.
-      const std::string origin = firstLine(tool / ".dfr-clone");
-      if (!origin.empty() && fs::is_directory(origin) && firstLine(fs::path(origin) / "version") != firstLine(tool / "version"))
-        bad(origin + " changed after this copy was made; run scripts/proton.py install --refresh '" + tool.filename().string() + "'");
-    }
-
-    bool found = false;
-    std::error_code ignored;
-    for (const auto& user : fs::directory_iterator(steam / "userdata", ignored)) {
-      const Vdf local = readVdf(user.path() / "config/localconfig.vdf");
-      std::vector<const Vdf*> lists;
-      local.findAll("apps", lists);
-      std::string options;
-      for (const Vdf* list : lists)
-        if (const Vdf* entry = list->child(app); options.empty() && entry) options = entry->get("LaunchOptions");
-      if (options.empty()) continue;
-      found = true;
-      const auto env = launchEnvironment(options);
-      auto setting = [&](const std::string& key) { const auto it = env.find(key); return it == env.end() ? std::string() : it->second; };
-      if (setting("DXVK_GAZE_VRS") != "1") bad("launch options lack DXVK_GAZE_VRS=1 before %command%; see 'dfrctl launch-options'");
-      else if (setting("DXVK_GAZE_CONFIG") != config) bad("launch options do not point DXVK_GAZE_CONFIG at " + config + "; live tuning and status are off");
-      else if (const std::string file = setting("DXVK_GAZE_FILE"); !file.empty() && file != gazeFile) bad("launch options use gaze file " + file + ", the bridge check below uses " + gazeFile);
-      else good("launch options enable gaze VRS with this config file");
-    }
-    if (!found) bad("no launch options set for app " + app + "; see 'dfrctl launch-options'");
-  }
-  if (!any) bad("no Steam configuration found; set STEAM_DIR");
-  status(config, gazeFile, &problems);
-  std::cout << (problems ? "Problems found: " + std::to_string(problems) : std::string("No problems found.")) << "\n";
-  return problems ? 1 : 0;
 }
 } // namespace
 
@@ -480,7 +215,6 @@ int main(int argc, char** argv) {
     } while (watch);
     return 0;
   }
-  if (command == "doctor") return doctor(config, gazeFile, args.empty() ? "438100" : args[0]);
   if (command == "show") {
     std::cout << "# " << config << (exists ? "" : " (does not exist: launch option values apply)") << "\n" << text;
     if (!text.empty() && text.back() != '\n') std::cout << "\n";
