@@ -52,7 +52,7 @@ base="$(git rev-parse -q --verify "upstream/$want^{commit}" || git rev-parse -q 
 }
 base_version="$(git describe "$base")"
 
-# Fixed identity and date: the same base and patches give the same commits.
+# With a fixed identity and date, the same base and patches give the same commits.
 export GIT_COMMITTER_NAME="vrchat-dfr-linux" GIT_COMMITTER_EMAIL="vrchat-dfr-linux@users.noreply.github.com"
 export GIT_COMMITTER_DATE="2000-01-01T00:00:00Z"
 git am -q --abort 2>/dev/null || true
@@ -64,8 +64,8 @@ if ! git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch; then
 fi
 git submodule update -q --init --recursive
 
-# DXVK takes its version string from `git describe`: tag the patched commit so
-# the DLL names its base commit and the revision of this repository.
+# DXVK takes its version string from `git describe`. Tagging the patched commit
+# makes the DLL name its base commit and the revision of this repository.
 revision="$(git -C "$repo_dir" rev-parse --short HEAD)"
 [[ -z "$(git -C "$repo_dir" status --porcelain --ignore-submodules=all)" ]] || revision+="+"
 git tag -l '*-dfr.*' | xargs -r git tag -d >/dev/null

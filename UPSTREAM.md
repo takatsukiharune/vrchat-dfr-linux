@@ -7,11 +7,13 @@ upstream this project patches.
 
 Repository: https://github.com/doitsujin/dxvk
 
-The patch targets `0cfe0898289fb11e3d8d0e1c62cd344b825b7d57`, recorded in
-`versions.env`, matching the upstream base of the canonical `dfr` branch.
-A clean application to that revision and the 64-bit Windows build have been
-verified locally. The original VRS patch has been updated to
-read the versioned OpenXR bridge protocol instead of WiVRn's export format.
+The patch series in `patches/dxvk` is written against
+`0cfe0898289fb11e3d8d0e1c62cd344b825b7d57`, the commit the `dxvk` submodule
+pins. It is the upstream base of the canonical `dfr` branch
+(ReinaS-64892/dxvk). The series has two patches: the new gaze source files,
+then the hooks in existing DXVK files. `git am -3` also applies it to the DXVK
+commits of GE-Proton11-12 (`f8637768`), proton-cachyos 20261015 (`a78a467c`)
+and upstream master as of 2026-11-17, and those builds compile.
 
 The patch also includes the VRS tile-capacity fix from local DXVK commit
 `1e25cb242d23be9f5455dca11d8a0761d1c6daab`. Attachment capacity scales with
@@ -21,8 +23,7 @@ and pass bounds checks use the same capacity, which is logged at startup.
 
 The patch also ports double-buffered uploads and matching DOT latency from
 canonical DXVK commit `985e429f25ca8c4ac70927f119df66f90e567178`.
-`DXVK_COMMIT` is the matching upstream
-patch-application base; the patched source matches the canonical gaze revision.
+The pinned commit is the matching upstream base.
 
 The VRS attachment and upload buffer now use two slots. Rendering keeps the
 completed front image while an upload is pending in the back slot. GPU command
@@ -40,7 +41,7 @@ and `DXVK_GAZE_FAKE=grid` overlay behavior is retained. Slot lifetime is tracked
 by command lists, including teardown and partially failed resource allocation.
 
 Canonical DXVK commit `54010d54d3a41e0b23bdf08ba6e6dfd7a3683844`
-(`DXVK_GAZE_COMMIT`) moves gaze file mapping, freshness checks, transforms,
+moves gaze file mapping, freshness checks, transforms,
 fake gaze and tile-map generation onto `dxvk-gaze-map`. The worker polls every
 4 ms after receiving a candidate render-target description, computes outside
 the mailbox lock, and retains only the latest queued request and completed
@@ -60,7 +61,7 @@ independent polling, invalidation/recovery, failure and worker shutdown.
 
 ### Changes on top of the canonical gaze revision
 
-The patch in this repository no longer equals `DXVK_GAZE_COMMIT`; it adds:
+The series no longer equals the canonical gaze commit `54010d54`; it adds:
 
 - `dxvk_gaze_config.h`: validated settings, read from the environment and from
   an optional config file (`DXVK_GAZE_CONFIG`) that is re-read while running,
@@ -80,11 +81,7 @@ The patch in this repository no longer equals `DXVK_GAZE_COMMIT`; it adds:
 - Each uploaded slot remembers the full map request, so a radius or rate change
   re-uploads; "gaze source opened" is logged once instead of every 2 seconds.
 - `DXVK_GAZE_FILE` / `DXVK_GAZE_CONFIG` accept Linux paths.
+- `mid`: the rate of the ring between `full_area` and `mid_area`, resolved
+  against the device like `coarse`.
 
-The working DXVK build configuration was:
-
-```text
--Dbuildtype=release -Denable_d3d8=false -Denable_d3d9=false -Denable_d3d10=false --cross-file=build-win64.txt
-```
-
-The patch contains the parent blob hashes for the modified DXVK files.
+`scripts/build-dxvk.sh` holds the DXVK build configuration.

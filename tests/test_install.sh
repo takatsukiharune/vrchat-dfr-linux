@@ -40,7 +40,7 @@ grep -q '"display_name" "GE-Test-dfr"' "$tools/GE-Test-dfr/compatibilitytool.vdf
 "$install" --dxvk-from "$dir/match" GE-Test-dfr >/dev/null
 fails "$install" --dxvk-from "$dir/mismatch" "GE Test"
 "$install" --force --dxvk-from "$dir/mismatch" "GE Test" >/dev/null
-fails "$install" --dxvk-from "$dir/stock-is-not-a-build" "GE Test"
+fails "$install" --dxvk-from "$dir/missing" "GE Test"
 mkdir "$dir/stock" && cp "$(dll "GE Test" d3d11.dll)" "$(dll "GE Test" dxgi.dll)" "$dir/stock/"
 fails "$install" --dxvk-from "$dir/stock" "GE Test"
 
@@ -67,7 +67,7 @@ grep -q '^stock' "$(dll Mine d3d11.dll)" && [[ ! -e "$(dll Mine d3d11.dll.stock)
 
 # A Proton update replaced the patched DLLs: the kept copies are older and go.
 "$install" --in-place --dxvk-from "$dir/match" Mine >/dev/null
-proton Mine "$ge" 2>/dev/null || { chmod -R u+w "$tools/Mine"; proton Mine "$ge"; }
+chmod -R u+w "$tools/Mine" && proton Mine "$ge"
 "$uninstall" Mine >/dev/null
 grep -q '^stock' "$(dll Mine d3d11.dll)" && [[ ! -e "$(dll Mine d3d11.dll.stock)" ]]
 

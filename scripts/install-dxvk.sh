@@ -135,7 +135,7 @@ VDF
     exit 0
   fi
 elif [[ ! -f "$dest/.dfr-clone" ]]; then
-  # In place: keep Proton's own DLLs, once. A patched DLL is never kept as stock.
+  # Keep Proton's own DLLs once. A patched DLL is never kept as stock.
   target="$(proton_dxvk_dir "$dest")"
   if ! is_patched_dll "$target/d3d11.dll"; then
     for name in d3d11.dll dxgi.dll; do cp -pf "$target/$name" "$target/$name.stock"; done

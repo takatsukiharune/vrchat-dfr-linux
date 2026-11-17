@@ -43,9 +43,11 @@ one worth keeping on its merits (2x2 in post-processing never helps).
 
 - Push the boundary out, e.g. `dfrctl set full_area 60 mid_area 80`, so
   less of the image runs at 2x2 and the seam sits where you rarely look.
-- Not implemented: an intermediate 2x1 / 1x2 rate for the `mid_area` ring.
-  Today the map goes from 1x1 straight to 2x2 on this GPU (the mid ring is
-  clamped to 2x2 in `dxvk_gaze_map.h`); a half step would halve both the
-  jump at the border and the shimmer there, at half the saving.
+- Use an intermediate rate for the `mid_area` ring, `dfrctl set mid 2x1` or
+  `mid 1x2`. By default the map goes from 1x1 straight to 2x2 on this GPU.
+  The half step makes the ring one step coarser than the centre instead of
+  two. In the benchmark (`dev-container.sh e2e --bench`, 4128x2208,
+  `full_area 45 mid_area 65`) a frame took 57% of the full-rate time with
+  `mid 2x2` and 60% with `mid 2x1`. Nobody has judged it in the headset yet.
 - Judge in the headset rather than the desktop mirror: in the mirror you
   look straight at the periphery, which exaggerates the seam.

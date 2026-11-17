@@ -17,8 +17,8 @@ dll_dxvk_version() {
 # Commit hash inside a describe string.
 version_commit() { sed -n -E 's/^v[0-9.]+-[0-9]+-g([0-9a-f]{7,}).*/\1/p' <<<"$1"; }
 
-# DXVK commit a Proton build ships: Proton records it in dxvk/version, and the
-# stock DLL carries it as a fallback.
+# DXVK commit a Proton build ships. Proton records it in dxvk/version, and the
+# stock DLL carries it too.
 proton_dxvk_commit() {
   local dir dll
   dir="$(proton_dxvk_dir "$1")"
@@ -72,8 +72,8 @@ list_proton_installs() {
   done < <(proton_installs)
 }
 
-# Replace a (possibly read-only) file without writing over it: a running game
-# keeps its old copy, and the mode of the original is preserved.
+# Replace a file, read-only or not, by renaming a new one over it. A running
+# game keeps its old copy, and the new file gets the mode of the original.
 replace_file() {
   local src="$1" dst="$2" tmp
   tmp="$(mktemp "$dst.XXXXXX")"

@@ -30,7 +30,7 @@ runtime's standard OpenXR interface supplies the data without a runtime patch.
 ## Shared memory protocol
 
 The canonical ABI is [shared/gaze_shm.h](../shared/gaze_shm.h), embedded unchanged
-as `src/dxvk/dxvk_gaze_shm.h` in the DXVK patch. It is 64 bytes, little endian,
+as `src/dxvk/dxvk_gaze_shm.h` in the DXVK patches. It is 64 bytes, little endian,
 with 16 aligned 32-bit words. Linux GCC/Clang and MinGW use lock-free 32-bit
 atomic operations for every word, including payload. There is no interprocess
 C++ mutex or non-atomic concurrent payload access.

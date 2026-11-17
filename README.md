@@ -44,24 +44,41 @@ multiple foveation spots. These are the tested values, not universal
 requirements.
 
 > [!WARNING]
-> Use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, DXVK or any OpenXR runtime. It replaces `d3d11.dll` and `dxgi.dll` in your Proton install, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how.  
+> Use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, DXVK or any OpenXR runtime. It runs the game with modified `d3d11.dll` and `dxgi.dll`, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how.  
 > I also recommend against using MSAA/Anti-Aliasing in VRChat with this, as increasing the MSAA sample count can limit the maximum VRS coarse rate available on some GPUs. For better image quality, use a higher render resolution instead.
 
 ## Install
 
-**DXVK** - replaces `d3d11.dll` and `dxgi.dll` in a Proton install:  
-**! Replaces files in your Proton install (originals are backed up to `.backup/`).**
+**DXVK.** The installer copies a Proton build to `<name>-dfr` and puts the
+patched `d3d11.dll` and `dxgi.dll` into the copy. It does not change the
+Proton build itself.
 
-    ./scripts/install-dxvk.sh --dxvk-from ./dxvk-gaze-vrs.zip "/path/to/Proton"  
+```bash
+./scripts/install-dxvk.sh                       # list the Proton builds found
+./scripts/dev-container.sh build --proton GE-Proton11-12
+./scripts/install-dxvk.sh GE-Proton11-12        # makes GE-Proton11-12-dfr
+```
 
+Restart Steam and select `GE-Proton11-12-dfr` as the compatibility tool for
+the game. `uninstall-dxvk.sh GE-Proton11-12-dfr` deletes the copy.
 
-Omit `--dxvk-from` to use a local build from `dist/dxvk`. The installer
-backs up the originals to `.backup/` and only touches those two files. A
-Proton update overwrites them - reinstall afterward.
+The DLLs must come from the DXVK commit the Proton build ships. `build
+--proton` reads that commit from the Proton build and builds for it. The
+installer picks the matching build from `dist/` and refuses any other, unless
+you pass `--force`. A release zip, installed with `--dxvk-from
+./dxvk-gaze-vrs.zip`, has DLLs for one DXVK commit and fits few Proton builds.
 
-To go back to stock DXVK, restore the backup the installer printed:
+GE-Proton and proton-cachyos add their own patches to DXVK. A build made here
+has the upstream commit plus the gaze patches, without theirs. GE-Proton 11-12
+carries fullscreen, HDR and overlay fixes for desktop games there.
 
-    ./scripts/uninstall-dxvk.sh .backup/dxvk-YYYYMMDD-HHMMSS
+When Steam updates the Proton build, the copy stays as it was. `dfrctl doctor`
+reports that, and `install-dxvk.sh --refresh NAME` makes the copy again.
+
+`--in-place` patches the Proton build itself and keeps its own DLLs beside
+them as `d3d11.dll.stock` and `dxgi.dll.stock`. `uninstall-dxvk.sh NAME` puts
+them back. A Proton update replaces the patched DLLs, and you must install
+again.
 
 Removing `DXVK_GAZE_VRS=1` from the launch options also turns everything off:
 without it the patched DLLs run none of the gaze code.
@@ -122,6 +139,7 @@ dfrctl set dot 1                      # show where DXVK thinks you are looking
 dfrctl off                            # full-rate rendering, e.g. for a screenshot
 dfrctl on
 dfrctl status                         # is it actually foveating right now?
+dfrctl doctor                         # is the whole setup right? Proton build, launch options, bridge
 dfrctl keys                           # every setting and its range
 ```
 
@@ -138,6 +156,7 @@ DXVK:   running
         map_uploads_per_s=42
         pass=4128x2208 layers=1 fmt=97 samples=1
         coarse=2x2
+        mid=2x2
         texel=8x8
 Bridge: running, gaze L=(0.512, 0.487) R=(0.488, 0.487)
 ```
@@ -201,7 +220,8 @@ config file, under the name without `DXVK_GAZE_` in lower case (`full_area`,
 | `DXVK_GAZE_FMT=97` | Restrict to the RGBA16F scene pass |
 | `DXVK_GAZE_FLIP_Y=1` | Flip scene-pass Y |
 | `DXVK_GAZE_FULL_AREA` | Percent of the eye image that renders at full rate |
-| `DXVK_GAZE_MID_AREA` | Percent rendered at full or 2×2; beyond it uses `COARSE` |
+| `DXVK_GAZE_MID_AREA` | Percent rendered at full rate or at `MID`; beyond it uses `COARSE` |
+| `DXVK_GAZE_MID` | Rate of the ring between `FULL_AREA` and `MID_AREA`: `1x1`, `2x1`, `1x2` or `2x2` (default). Never coarser than `COARSE` |
 | `DXVK_GAZE_R1` / `R2` | Inner / outer radius of the sharp region |
 | `DXVK_GAZE_COARSE` | Outer shading rate: `auto` (coarsest the GPU supports), `2x2`, `4x4`, ... or a raw rate code. Clamped to what the GPU supports |
 | `DXVK_GAZE_DEBUG=1` | Pass/gaze diagnostics |
@@ -229,35 +249,53 @@ dimension) and are used only when the area variables are not set.
 
 ## Build
 
-The DXVK revision is pinned in `versions.env`. `setup-dev.sh` clones it into
-`.work/dxvk`, initializes submodules, applies the patch if needed, and builds
-both the bridge and the OpenXR probe. It leaves an existing different DXVK HEAD
-untouched and reports an error.
+DXVK is the `dxvk` submodule, pinned at an upstream commit, plus the patch
+series in `patches/dxvk`. The build applies the series with `git am -3` in its
+own clone and does not change the submodule.
+
+The container needs only podman. It mounts the repository read-only apart from
+`dist/`, and it does not touch the host's Proton, Wine prefix or VR runtime.
+Each command runs in a new container that is deleted afterwards.
 
 ```bash
-bash scripts/setup-dev.sh
-bash scripts/build-dxvk.sh         # dist/dxvk/{d3d11,dxgi}.dll
+bash scripts/dev-container.sh all                   # build + every test; results land in dist/
+bash scripts/dev-container.sh build --proton NAME   # DXVK for the commit that Proton build ships
+bash scripts/dev-container.sh build --ref v3.1.1    # DXVK for any upstream commit, tag or branch
+bash scripts/dev-container.sh e2e --bench           # time per frame with VRS off and on
+bash scripts/dev-container.sh rm                    # delete the images and the work volume
+```
+
+The end-to-end test and the benchmark need a Vulkan driver with
+`VK_KHR_fragment_shading_rate`, which Mesa's software driver lacks. The
+script passes the GPU render node into the container for them, and they use
+their own Wine prefix.
+
+The same scripts run on the host:
+
+```bash
+bash scripts/setup-dev.sh           # checks the tools, fetches the submodule, builds bridge and probe
+bash scripts/build-dxvk.sh          # dist/dxvk/{d3d11,dxgi}.dll
 bash scripts/build-openxr-bridge.sh # dist/gaze/{openxr-gaze-bridge,dfrctl}
-bash scripts/test-gaze-bridge.sh    # projection, IPC, settings, map worker and simulated OpenXR tests
+bash scripts/test-gaze-bridge.sh    # projection, IPC, settings, map worker, simulated OpenXR, dfrctl, installer
 bash scripts/test-dxvk-e2e.sh       # the built DLLs under Wine on a real GPU, with validation layers
 ```
 
-Or do all of it in a container, without installing anything on the host and
-without touching the host's Proton, Wine prefix or VR runtime (the repository
-is the only directory mounted; the GPU render node is passed through so the
-end-to-end test can render offscreen):
+`DXVK_WORK_DIR`, `DXVK_OUTPUT_DIR` and `DXVK_BUILD_JOBS` override the DXVK
+build clone, output path and parallel job count (default 4). `CXX` and
+`GAZE_OUTPUT_DIR` override the bridge compiler and output directory.
+
+To change the DXVK code:
 
 ```bash
-bash scripts/dev-container.sh all   # build + every test; results land in dist/
-bash scripts/dev-container.sh rm    # delete the container and image again
+bash scripts/dxvk-patches.sh apply    # dxvk/ on branch dfr: pinned commit + patches
+# edit and commit in dxvk/
+bash scripts/dxvk-patches.sh export   # rewrite patches/dxvk from those commits
+bash scripts/dxvk-patches.sh check master   # do the patches still apply to upstream?
 ```
 
-The end-to-end test needs a Vulkan driver with `VK_KHR_fragment_shading_rate`
-(Mesa's software driver has none) and uses its own throwaway Wine prefix.
-
-`DXVK_SOURCE_DIR`, `DXVK_OUTPUT_DIR` and `DXVK_BUILD_JOBS` override the DXVK
-source path, output path and parallel job count (default 4). `CXX` and
-`GAZE_OUTPUT_DIR` override the bridge compiler and output directory.
+A DLL's version string names its base commit and this repository's revision,
+for example `v3.1.1-174-gf8637768-dfr.90f053c`. DXVK prints it at the start of
+its log.
 
 For extension enumeration without opening a session, use
 `./build/openxr-gaze-probe`. Add `--seconds 15` to that probe to inspect raw
@@ -298,8 +336,8 @@ OpenVR / existing-session route and its unresolved integration questions.
   DXVK log).
 - A sample systemd user unit for the bridge is in
   [`contrib/openxr-gaze-bridge.service`](contrib/openxr-gaze-bridge.service).
-- Revision: DXVK `0cfe0898` (see `versions.env`). The DXVK patch records its
-  parent blob hashes, so the DXVK ref must match exactly.
+- The `dxvk` submodule pins the DXVK commit the patches are written against,
+  `0cfe0898`.
 
 ## Demo with overexadurated values and gaze dot enabled
 [Google drive link](https://drive.google.com/file/d/1OabrqSbzjEp96AFs6StbJrUAcHWSyMiQ/view?usp=sharing)
