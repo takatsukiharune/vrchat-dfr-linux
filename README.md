@@ -78,8 +78,12 @@ only such a build for it. `scripts/build-dxvk.sh --proton DIR --plain` leaves
 those patches out. Other Proton builds get the upstream commit plus the gaze
 patches.
 
-When Steam updates the Proton build, the copy stays as it was. `dfrctl doctor`
-reports that, and `proton.py install --refresh NAME` makes the copy again.
+When Steam updates the Proton build, the copy stays as it was. `proton.py
+doctor` reports that, and `proton.py install --refresh NAME` makes the copy
+again.
+
+`scripts/proton.py doctor [APPID]` checks the Proton build that Steam uses for
+a game and the game's launch options. APPID defaults to 438100, VRChat.
 
 `--in-place` patches the Proton build itself and keeps its own DLLs beside
 them as `d3d11.dll.stock` and `dxgi.dll.stock`. `proton.py uninstall NAME` puts
@@ -145,7 +149,6 @@ dfrctl set dot 1                      # show where DXVK thinks you are looking
 dfrctl off                            # full-rate rendering, e.g. for a screenshot
 dfrctl on
 dfrctl status                         # is it actually foveating right now?
-dfrctl doctor                         # is the whole setup right? Proton build, launch options, bridge
 dfrctl keys                           # every setting and its range
 ```
 
