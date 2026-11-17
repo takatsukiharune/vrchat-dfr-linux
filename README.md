@@ -54,15 +54,15 @@ patched `d3d11.dll` and `dxgi.dll` into the copy. It does not change the
 Proton build itself.
 
 ```bash
-./scripts/install-dxvk.sh                       # list the Proton builds found
+./scripts/proton.py list                        # list the Proton builds found
 ./scripts/dev-container.sh build --proton GE-Proton11-12
-./scripts/install-dxvk.sh GE-Proton11-12        # makes GE-Proton11-12-dfr
+./scripts/proton.py install GE-Proton11-12      # makes GE-Proton11-12-dfr
 ```
 
 The copy's Steam name is the source's name plus `-dfr`, here
 `GE-Proton11-12-x86_64-dfr`. Restart Steam and select it as the compatibility
-tool for the game. `uninstall-dxvk.sh GE-Proton11-12` deletes the copy again.
-Both scripts take the source or the copy.
+tool for the game. `proton.py uninstall GE-Proton11-12` deletes the copy again.
+Both commands take the source or the copy.
 
 The DLLs must come from the DXVK commit the Proton build ships. `build
 --proton` reads that commit from the Proton build and builds for it. The
@@ -79,10 +79,10 @@ those patches out. Other Proton builds get the upstream commit plus the gaze
 patches.
 
 When Steam updates the Proton build, the copy stays as it was. `dfrctl doctor`
-reports that, and `install-dxvk.sh --refresh NAME` makes the copy again.
+reports that, and `proton.py install --refresh NAME` makes the copy again.
 
 `--in-place` patches the Proton build itself and keeps its own DLLs beside
-them as `d3d11.dll.stock` and `dxgi.dll.stock`. `uninstall-dxvk.sh NAME` puts
+them as `d3d11.dll.stock` and `dxgi.dll.stock`. `proton.py uninstall NAME` puts
 them back. A Proton update replaces the patched DLLs, and you must install
 again.
 
