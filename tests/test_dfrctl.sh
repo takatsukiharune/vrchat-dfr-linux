@@ -58,13 +58,50 @@ options "DXVK_GAZE_VRS=1 %command%"
 doctor | grep -q '!! launch options do not point DXVK_GAZE_CONFIG'
 options "%command%"
 [[ "$(doctor | grep -c '!!')" == 1 ]] && doctor | grep -q 'lack DXVK_GAZE_VRS=1'
+# Launch options are read as the shell runs them, from the game's own entry.
+options 'DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=\"'"$DFR_CONFIG"'\" %command%'
+doctor | grep -q 'ok launch options enable gaze VRS'
+options "%command% DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG"
+doctor | grep -q '!! launch options lack DXVK_GAZE_VRS=1'
+options "DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG DXVK_GAZE_VRS=0 %command%"
+doctor | grep -q '!! launch options lack DXVK_GAZE_VRS=1'
+options "gamemoderun DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG %command%"
+doctor | grep -q '!! launch options lack DXVK_GAZE_VRS=1'
+options "env DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG gamemoderun %command%"
+doctor | grep -q 'ok launch options enable gaze VRS'
+printf '"apps" { "438100" { "LastPlayed" "1" } "620" { "LaunchOptions" "DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=%s %%command%%" } }\n' \
+  "$DFR_CONFIG" > "$STEAM_DIR/userdata/1/config/localconfig.vdf"
+doctor | grep -q '!! no launch options set for app 438100'
+options "DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG %command%"
+
+# A Steam directory without a configuration is not one Steam uses.
+mkdir -p "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+[[ "$(doctor | grep -c '!!')" == 0 ]]
+
+# The copy's source: changed is a problem, the same or gone is not.
+rm "$tool/version" "$dir/origin/version"
+[[ "$(doctor | grep -c '!!')" == 0 ]]
 echo "build 2" > "$dir/origin/version"
-doctor | grep -q 'changed after this copy was made'
+doctor | grep -q "changed after this copy was made; run install-dxvk.sh --refresh 'GE-Test-dfr'"
+rm -rf "$dir/origin"
+[[ "$(doctor | grep -c '!!')" == 0 ]]
 printf ' a78a467cadb22bee928904290cf8e7921b121851 dxvk (v3.1.1-97-ga78a467)\n' > "$tool/files/lib/wine/dxvk/version"
 doctor | grep -q 'but this Proton build ships'
 printf 'v3.1.1-174-gf86377680682448-GE-Proton(dirty)\0' > "$tool/files/lib/wine/dxvk/x86_64-windows/d3d11.dll"
 doctor | grep -q 'with stock DXVK v3.1.1-174-gf86377680682448-GE-Proton(dirty); run install-dxvk.sh'
 printf '"CompatToolMapping" { "620" { "name" "x" } }\n' > "$STEAM_DIR/config/config.vdf"
 doctor | grep -q 'has no compatibility tool selected'
+
+# Steam's default tool (app 0) applies when the game has none of its own.
+printf '"CompatToolMapping" { "0" { "name" "GE-Test-x86_64-dfr" } }\n' > "$STEAM_DIR/config/config.vdf"
+doctor | grep -q "uses 'GE-Test-x86_64-dfr'"
+
+# Valve's Proton, patched with --in-place, is found in steamapps/common.
+valve="$STEAM_DIR/steamapps/common/Proton - Experimental/files/lib/wine/dxvk"
+mkdir -p "$valve/x86_64-windows"
+printf ' f863776806824486d709fee16ea619c03e22def4 dxvk (v3.1.1-174-gf86377680)\n' > "$valve/version"
+printf 'DXVK_GAZE_VRS\0v3.1.1-174-gf8637768-dfr.abc1234\0' > "$valve/x86_64-windows/d3d11.dll"
+printf '"CompatToolMapping" { "438100" { "name" "proton_experimental" } }\n' > "$STEAM_DIR/config/config.vdf"
+doctor | grep -q "ok app 438100 uses 'proton_experimental' with gaze DXVK"
 fails "$dfrctl" doctor
 echo "dfrctl tests passed"
