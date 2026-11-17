@@ -9,13 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate patch structure
-        run: |
-          git apply --numstat patches/dxvk-gaze-vrs.patch
-          test -s patches/dxvk-gaze-vrs.patch
+        with:
+          submodules: true
+          fetch-depth: 0
+      - name: Patches apply to the pinned DXVK commit
+        run: bash scripts/dxvk-patches.sh check
       - name: Install gaze test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libopenxr-dev python3
-      - name: Test gaze projection, IPC and OpenXR lifecycle
+      - name: Test gaze projection, IPC, OpenXR lifecycle, dfrctl and the installer
         run: bash scripts/test-gaze-bridge.sh

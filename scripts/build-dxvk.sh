@@ -57,7 +57,7 @@ export GIT_COMMITTER_NAME="vrchat-dfr-linux" GIT_COMMITTER_EMAIL="vrchat-dfr-lin
 export GIT_COMMITTER_DATE="2000-01-01T00:00:00Z"
 git am -q --abort 2>/dev/null || true
 git checkout -q -f --detach "$base"
-if ! git am -q -3 "$repo_dir"/patches/dxvk/*.patch; then
+if ! git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch; then
   git am -q --abort || true
   echo "patches/dxvk does not apply to DXVK $base_version." >&2
   exit 1

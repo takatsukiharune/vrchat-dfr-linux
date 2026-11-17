@@ -23,14 +23,14 @@ case "${1:-}" in
       exit 1
     fi
     git -C "$sub" switch -q -c dfr "$pinned"
-    git -C "$sub" am -q -3 "$repo_dir"/patches/dxvk/*.patch
+    git -C "$sub" am -q -k -3 "$repo_dir"/patches/dxvk/*.patch
     echo "dxvk/ is on branch dfr: $(git -C "$sub" describe "$pinned") + patches/dxvk"
     ;;
   export)
     [[ -z "$(git -C "$sub" status --porcelain)" ]] || { echo "dxvk/ has uncommitted changes." >&2; exit 1; }
     [[ "$(git -C "$sub" rev-list --count "$pinned..HEAD")" -gt 0 ]] || { echo "dxvk/ has no commits on top of $pinned." >&2; exit 1; }
     rm -f "$repo_dir"/patches/dxvk/*.patch
-    git -C "$sub" format-patch -q --no-signature --zero-commit --full-index -o "$repo_dir/patches/dxvk" "$pinned..HEAD"
+    git -C "$sub" format-patch -q -k --no-signature --zero-commit --full-index -o "$repo_dir/patches/dxvk" "$pinned..HEAD"
     ls "$repo_dir"/patches/dxvk
     ;;
   check)
@@ -42,11 +42,11 @@ case "${1:-}" in
     failed=0
     for ref in "${@:-$pinned}"; do
       if ! git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
-        git fetch -q "$dxvk_upstream_url" "$ref:refs/check/target"
+        git fetch -q "$dxvk_upstream_url" "+$ref:refs/check/target"
         ref=refs/check/target
       fi
       git checkout -q -f --detach "$ref"
-      if git am -q -3 "$repo_dir"/patches/dxvk/*.patch >/dev/null 2>&1; then
+      if git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch >/dev/null 2>&1; then
         echo "ok        $(git rev-parse --short "$ref")"
       else
         echo "CONFLICT  $(git rev-parse --short "$ref"): $(git diff --name-only --diff-filter=U | tr '\n' ' ')"

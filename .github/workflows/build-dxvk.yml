@@ -4,14 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       dxvk_ref:
-        description: 'DXVK base commit/tag (patch target); empty = DXVK_COMMIT from versions.env'
+        description: 'DXVK commit, tag or branch to build on; empty = the commit pinned by the dxvk submodule'
         required: false
         default: ''
-        type: string
-      dxvk_repo:
-        description: 'DXVK repository URL'
-        required: false
-        default: 'https://github.com/doitsujin/dxvk.git'
         type: string
       release_tag:
         description: 'Optional: create a GitHub Release with this tag (e.g. v1.0-gaze-vrs)'
@@ -28,43 +23,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
 
-      - name: Install DXVK build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            meson ninja-build glslang-tools \
-            gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
-
-      - name: Clone DXVK
-        run: |
-          source versions.env
-          ref="${{ inputs.dxvk_ref }}"
-          git clone --recursive "${{ inputs.dxvk_repo || 'https://github.com/doitsujin/dxvk.git' }}" dxvk
-          git -C dxvk checkout --recurse-submodules "${ref:-$DXVK_COMMIT}"
-
-      - name: Apply DXVK patch
-        run: |
-          git -C dxvk apply --check "$GITHUB_WORKSPACE/patches/dxvk-gaze-vrs.patch"
-          git -C dxvk apply        "$GITHUB_WORKSPACE/patches/dxvk-gaze-vrs.patch"
-
-      - name: Configure
-        run: |
-          meson setup dxvk/build dxvk \
-            --cross-file dxvk/build-win64.txt \
-            -Dbuildtype=release \
-            -Denable_d3d8=false \
-            -Denable_d3d9=false \
-            -Denable_d3d10=false
-
+      # The same container image and script as a local build.
       - name: Build
-        run: ninja -C dxvk/build
+        env:
+          DXVK_REF: ${{ inputs.dxvk_ref }}
+        run: bash scripts/dev-container.sh build ${DXVK_REF:+--ref "$DXVK_REF"}
 
       - name: Collect DLLs
         run: |
           mkdir -p dist-dxvk
-          cp dxvk/build/src/d3d11/d3d11.dll dist-dxvk/
-          cp dxvk/build/src/dxgi/dxgi.dll   dist-dxvk/
+          cp dist/dxvk*/d3d11.dll dist/dxvk*/dxgi.dll dist-dxvk/
+          grep -a -o -m1 -E 'v[0-9.]+-[0-9]+-g[0-9a-f]+-dfr\.[0-9a-f+]+' dist-dxvk/d3d11.dll | head -n1
 
       - uses: actions/upload-artifact@v4
         with:
@@ -133,11 +106,11 @@ jobs:
           body: |
             Experimental gaze-driven VRS build.
 
-            - DXVK base: `${{ inputs.dxvk_ref || 'DXVK_COMMIT in versions.env' }}`
+            - DXVK base: `${{ inputs.dxvk_ref || 'the commit pinned by the dxvk submodule' }}`
             - Gaze: native Linux OpenXR headless bridge for an unmodified OpenXR runtime
 
             See README for install and VRChat launch configuration.
           files: |
             release/dxvk-gaze-vrs.zip
             release/openxr-gaze-bridge-linux-x86_64.zip
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true

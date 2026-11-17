@@ -1,0 +1,25 @@
+name: Patches against current DXVK
+
+# Tells us the day an upstream change or a new GE-Proton release breaks the
+# patch series, instead of when someone tries to build for it.
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+      - name: Apply to DXVK master and to the DXVK commit of the latest GE-Proton
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ge="$(gh api repos/GloriousEggroll/proton-ge-custom/releases/latest -q .tag_name)"
+          ge_dxvk="$(gh api "repos/GloriousEggroll/proton-ge-custom/contents/dxvk?ref=$ge" -q .sha)"
+          echo "$ge ships DXVK $ge_dxvk"
+          bash scripts/dxvk-patches.sh check master "$ge_dxvk"
