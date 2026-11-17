@@ -33,3 +33,11 @@ python3 "$repo_dir/tests/test_gaze_bridge.py" "$build_dir/gaze-bridge-fake"
 "${CXX:-c++}" "${common[@]}" "$repo_dir/tools/dfrctl.cpp" -pthread -o "$build_dir/dfrctl"
 bash "$repo_dir/tests/test_dfrctl.sh" "$build_dir/dfrctl"
 bash "$repo_dir/tests/test_install.sh"
+bash "$repo_dir/tests/test_dev_container.sh"
+# The benchmark refuses a case DXVK would ignore, before it starts anything.
+if python3 "$repo_dir/tests/e2e/test_dxvk_e2e.py" --dxvk - --probe - --writer - --work "$build_dir/bench-args" \
+    --bench 45,65,3x3 2>"$build_dir/bench-args.log"; then
+  echo "--bench accepted mid=3x3" >&2; exit 1
+fi
+grep -q 'not 3x3' "$build_dir/bench-args.log"
+echo "bench argument tests passed"

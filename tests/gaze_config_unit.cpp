@@ -38,8 +38,17 @@ int main() {
   assert(c.set("coarse", "2x4") && c.coarse == 6);
   assert(c.set("coarse", "auto") && c.autoCoarse);
   assert(c.set("coarse", "5") && c.coarse == 5 && !c.autoCoarse);
-  assert(c.mid == 5 && c.set("mid", "2x1") && c.mid == 4 && c.set("mid", "1") && c.mid == 1);
-  assert(!c.set("mid", "auto") && !c.set("mid", "3x3") && c.mid == 1);
+  assert(c.mid == GazeConfig::RateAuto && c.set("mid", "2x1") && c.mid == 4 && c.set("mid", "1") && c.mid == 1);
+  assert(!c.set("mid", "3x3") && c.mid == 1 && c.set("mid", "auto") && c.mid == GazeConfig::RateAuto);
+
+  // The mid ring's rate for each outer rate. By default it is what it was before
+  // `mid` existed (2x2, or the outer rate where that is finer), except that it is
+  // never coarser than the outer rate in either axis. Codes: 1x1=0 1x2=1 1x4=2
+  // 2x1=4 2x2=5 2x4=6 4x1=8 4x2=9 4x4=10.
+  const std::map<uint32_t, uint32_t> automatic = {
+    {0, 0}, {1, 1}, {2, 2}, {4, 4}, {5, 5}, {6, 5}, {8, 4}, {9, 5}, {10, 5}};
+  for (const auto& [outer, ring] : automatic) assert(gazeMidRate(GazeConfig::RateAuto, outer) == ring);
+  assert(gazeMidRate(4, 10) == 4 && gazeMidRate(4, 2) == 0 && gazeMidRate(5, 2) == 1 && gazeMidRate(0, 10) == 0);
   assert(c.set("enabled", "off") && !c.enabled && c.set("vrs", "1") && c.enabled);
   assert(c.set("flipx_l", "1") && c.forceFlipX[0] == 1 && c.set("flipx_l", "auto") && c.forceFlipX[0] == -1);
   assert(c.set("fallback", "center") && c.fallback == GazeFallback::Center);

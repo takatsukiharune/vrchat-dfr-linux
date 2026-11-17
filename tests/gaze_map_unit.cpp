@@ -59,8 +59,7 @@ static void checkPixels(const GazeMapRequest &r)
         const float lx=sbs ? px-float(eye)*eyeW : px;
         const float d=std::hypot(lx-r.fx[eye]*eyeW,py-r.fy[eye]*r.shape[1])/minD;
         uint8_t expected=0u;
-        const uint32_t mid=(std::min(r.mid>>2u,r.coarse>>2u)<<2u)|std::min(r.mid&3u,r.coarse&3u);
-        if (d>=r1) expected=uint8_t(d>=r2 ? r.coarse:mid);
+        if (d>=r1) expected=uint8_t(d>=r2 ? r.coarse:r.mid);
         assert(result.data[size_t(l)*stride+y*tx+x]==expected);
       }
     for (uint32_t i=tx*ty; i<stride; ++i) assert(result.data[size_t(l)*stride+i]==0u);
