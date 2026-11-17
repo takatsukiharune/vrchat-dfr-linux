@@ -38,4 +38,33 @@ touch -d '1 minute ago' "$DFR_CONFIG.status"
 "$dfrctl" status | grep -q 'not running'
 "$dfrctl" reset >/dev/null && [[ ! -e "$DFR_CONFIG" ]]
 "$dfrctl" show | grep -q 'does not exist'
+# doctor: which Proton build the game uses, whether it is patched, launch options.
+export HOME="$dir/home" STEAM_DIR="$dir/steam"
+tool="$STEAM_DIR/compatibilitytools.d/GE-Test-dfr"
+mkdir -p "$tool/files/lib/wine/dxvk/x86_64-windows" "$STEAM_DIR/config" "$STEAM_DIR/userdata/1/config" "$dir/origin"
+printf '"compat_tools" { "GE-Test-x86_64-dfr" { "install_path" "." } }\n' > "$tool/compatibilitytool.vdf"
+printf ' f863776806824486d709fee16ea619c03e22def4 dxvk (v3.1.1-174-gf86377680)\n' > "$tool/files/lib/wine/dxvk/version"
+printf 'x\0DXVK_GAZE_VRS\0v3.1.1-1H\0v3.1.1-174-gf8637768-dfr.abc1234\0' > "$tool/files/lib/wine/dxvk/x86_64-windows/d3d11.dll"
+printf '"CompatToolMapping" { "438100" { "name" "GE-Test-x86_64-dfr" "config" "" } }\n' > "$STEAM_DIR/config/config.vdf"
+options() { printf '"apps" { "438100" { "LastPlayed" "1" "LaunchOptions" "%s" } }\n' "$1" > "$STEAM_DIR/userdata/1/config/localconfig.vdf"; }
+options "DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG %command%"
+echo "build 1" > "$tool/version"; echo "build 1" > "$dir/origin/version"; echo "$dir/origin" > "$tool/.dfr-clone"
+doctor() { "$dfrctl" doctor 2>/dev/null || true; }
+report="$(doctor)"
+grep -q "ok app 438100 uses 'GE-Test-x86_64-dfr' with gaze DXVK v3.1.1-174-gf8637768-dfr.abc1234" <<<"$report"
+grep -q 'ok launch options enable gaze VRS' <<<"$report"
+grep -q 'Problems found: 1' <<<"$report"   # only the bridge, which is not running here
+options "DXVK_GAZE_VRS=1 %command%"
+doctor | grep -q '!! launch options do not point DXVK_GAZE_CONFIG'
+options "%command%"
+[[ "$(doctor | grep -c '!!')" == 1 ]] && doctor | grep -q 'lack DXVK_GAZE_VRS=1'
+echo "build 2" > "$dir/origin/version"
+doctor | grep -q 'changed after this copy was made'
+printf ' a78a467cadb22bee928904290cf8e7921b121851 dxvk (v3.1.1-97-ga78a467)\n' > "$tool/files/lib/wine/dxvk/version"
+doctor | grep -q 'but this Proton build ships'
+printf 'v3.1.1-174-gf86377680682448-GE-Proton(dirty)\0' > "$tool/files/lib/wine/dxvk/x86_64-windows/d3d11.dll"
+doctor | grep -q 'with stock DXVK v3.1.1-174-gf86377680682448-GE-Proton(dirty); run install-dxvk.sh'
+printf '"CompatToolMapping" { "620" { "name" "x" } }\n' > "$STEAM_DIR/config/config.vdf"
+doctor | grep -q 'has no compatibility tool selected'
+fails "$dfrctl" doctor
 echo "dfrctl tests passed"
