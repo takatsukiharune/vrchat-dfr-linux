@@ -1,0 +1,10 @@
+# Build and test image. `build` has the toolchains; `e2e` adds Wine, Mesa and
+# the Vulkan validation layer for the end-to-end test.
+FROM registry.fedoraproject.org/fedora@sha256:3632de47c2cef45d6a6ea6a420280ff9ce452e225a1b291299c105b9d9bae471 AS build
+RUN dnf install -y git meson ninja-build gcc-c++ pkgconf-pkg-config python3 diffutils findutils which procps-ng \
+      mingw64-gcc-c++ mingw64-winpthreads-static mingw64-headers glslang openxr-devel \
+    && dnf clean all
+
+FROM build AS e2e
+RUN dnf install -y wine-core mesa-vulkan-drivers vulkan-validation-layers vulkan-tools \
+    && dnf clean all
