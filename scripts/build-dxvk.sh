@@ -35,11 +35,11 @@ done
 }
 pinned="$(pinned_dxvk_commit "$repo_dir")"
 if [[ -n "$proton" ]]; then
-  ref="$(proton_dxvk_commit "$proton")" || {
+  ref="$("$repo_dir/scripts/proton.py" commit "$proton")" || {
     echo "Cannot tell which DXVK commit $proton ships. Pass --ref COMMIT." >&2
     exit 1
   }
-  (( plain )) || variant="$(proton_variant "$proton")"
+  (( plain )) || variant="$("$repo_dir/scripts/proton.py" variant "$proton")"
 fi
 
 [[ -d "$work/.git" ]] || git clone -q --no-checkout "$repo_dir/dxvk" "$work"

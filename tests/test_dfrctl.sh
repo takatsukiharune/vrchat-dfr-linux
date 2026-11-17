@@ -82,13 +82,13 @@ mkdir -p "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
 rm "$tool/version" "$dir/origin/version"
 [[ "$(doctor | grep -c '!!')" == 0 ]]
 echo "build 2" > "$dir/origin/version"
-doctor | grep -q "changed after this copy was made; run install-dxvk.sh --refresh 'GE-Test-dfr'"
+doctor | grep -q "changed after this copy was made; run scripts/proton.py install --refresh 'GE-Test-dfr'"
 rm -rf "$dir/origin"
 [[ "$(doctor | grep -c '!!')" == 0 ]]
 printf ' a78a467cadb22bee928904290cf8e7921b121851 dxvk (v3.1.1-97-ga78a467)\n' > "$tool/files/lib/wine/dxvk/version"
 doctor | grep -q 'but this Proton build ships'
 printf 'v3.1.1-174-gf86377680682448-GE-Proton(dirty)\0' > "$tool/files/lib/wine/dxvk/x86_64-windows/d3d11.dll"
-doctor | grep -q 'with stock DXVK v3.1.1-174-gf86377680682448-GE-Proton(dirty); run install-dxvk.sh'
+doctor | grep -q 'with stock DXVK v3.1.1-174-gf86377680682448-GE-Proton(dirty); run scripts/proton.py install'
 printf '"CompatToolMapping" { "620" { "name" "x" } }\n' > "$STEAM_DIR/config/config.vdf"
 doctor | grep -q 'has no compatibility tool selected'
 

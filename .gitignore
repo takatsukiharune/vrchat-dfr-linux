@@ -4,3 +4,4 @@ dist/
 .backup/
 *.log
 *.swp
+__pycache__/

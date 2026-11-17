@@ -43,8 +43,7 @@ jobs:
         run: |
           mkdir -p dist-dxvk
           cp dist/dxvk*/d3d11.dll dist/dxvk*/dxgi.dll dist-dxvk/
-          source scripts/lib.sh
-          version="$(dll_dxvk_version dist-dxvk/d3d11.dll)"
+          version="$(scripts/proton.py dll-version dist-dxvk/d3d11.dll)"
           [[ "$version" == *-dfr.* ]] || { echo "No gaze DXVK version in d3d11.dll" >&2; exit 1; }
           echo "$version"
 

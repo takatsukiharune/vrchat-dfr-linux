@@ -18,7 +18,6 @@
 #   scripts/dev-container.sh rm       delete the images and the volume
 set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$repo_dir/scripts/lib.sh"
 engine="${DFR_CONTAINER_ENGINE:-podman}"
 volume="vrchat-dfr-work"
 command -v "$engine" >/dev/null || { echo "Missing: $engine" >&2; exit 1; }
@@ -67,8 +66,7 @@ case "${1:-}" in
     args=() mount=()
     while [[ $# -gt 0 ]]; do
       if [[ "$1" == --proton ]]; then
-        proton="$(resolve_proton "${2:?--proton needs a Proton directory or name}")" \
-          || { echo "No Proton build '$2'. Found:" >&2; list_proton_installs >&2; exit 1; }
+        proton="$("$repo_dir/scripts/proton.py" resolve "${2:?--proton needs a Proton directory or name}")" || exit 1
         mount=("--volume=$proton:/proton:ro")
         args+=(--proton /proton)
         shift 2

@@ -393,7 +393,7 @@ int doctor(const std::string& config, const std::string& gazeFile, const std::st
     if (name.empty()) {
       bad("app " + app + " has no compatibility tool selected; select a patched one in its Steam properties");
     } else if (tool.empty()) {
-      bad("app " + app + " uses '" + name + "', which is not in compatibilitytools.d; install-dxvk.sh makes a patched copy");
+      bad("app " + app + " uses '" + name + "', which is not in compatibilitytools.d; scripts/proton.py install makes a patched copy");
     } else {
       const fs::path dxvk = tool / "files/lib/wine/dxvk";
       std::string dll;
@@ -403,7 +403,7 @@ int doctor(const std::string& config, const std::string& gazeFile, const std::st
       const size_t hashEnd = hash == std::string::npos ? hash : version.find_first_not_of("0123456789abcdef", hash + 2);
       const std::string commit = hash == std::string::npos ? "" : version.substr(hash + 2, hashEnd - hash - 2);
       if (dll.find("DXVK_GAZE_VRS") == std::string::npos)
-        bad("app " + app + " uses '" + name + "' with stock DXVK " + version + "; run install-dxvk.sh");
+        bad("app " + app + " uses '" + name + "' with stock DXVK " + version + "; run scripts/proton.py install");
       else if (commit.empty() || shipped.find(commit) == std::string::npos)
         bad("'" + name + "' has gaze DXVK " + version + ", but this Proton build ships" + shipped + "; build with --proton and reinstall");
       else
@@ -417,7 +417,7 @@ int doctor(const std::string& config, const std::string& gazeFile, const std::st
       // A copy whose source is gone keeps working; one whose source changed is behind.
       const std::string origin = firstLine(tool / ".dfr-clone");
       if (!origin.empty() && fs::is_directory(origin) && firstLine(fs::path(origin) / "version") != firstLine(tool / "version"))
-        bad(origin + " changed after this copy was made; run install-dxvk.sh --refresh '" + tool.filename().string() + "'");
+        bad(origin + " changed after this copy was made; run scripts/proton.py install --refresh '" + tool.filename().string() + "'");
     }
 
     bool found = false;
