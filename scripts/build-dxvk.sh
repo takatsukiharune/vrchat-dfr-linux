@@ -1,31 +1,89 @@
 #!/usr/bin/env bash
+# Builds d3d11.dll and dxgi.dll from an upstream DXVK commit plus patches/dxvk.
+#
+#   build-dxvk.sh                  the commit pinned by the dxvk submodule -> dist/dxvk
+#   build-dxvk.sh --proton DIR     the commit that Proton build ships      -> dist/dxvk-<version>
+#   build-dxvk.sh --ref REF        any upstream commit, tag or branch      -> dist/dxvk-<version>
+#
+# The submodule is only read. The build happens in a separate clone
+# (DXVK_WORK_DIR, default .work/dxvk-build). DXVK_OUTPUT_DIR and
+# DXVK_BUILD_JOBS override the output directory and the job count.
 set -euo pipefail
-
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_dir="${DXVK_SOURCE_DIR:-$repo_dir/.work/dxvk}"
-out_dir="${DXVK_OUTPUT_DIR:-$repo_dir/dist/dxvk}"
+source "$repo_dir/scripts/lib.sh"
+work="${DXVK_WORK_DIR:-$repo_dir/.work/dxvk-build}"
 
-if [[ ! -d "$source_dir/.git" ]]; then
-  echo "DXVK source not found: $source_dir" >&2
-  echo "Clone the exact upstream revision used for your working tree, then set DXVK_SOURCE_DIR." >&2
+ref="" proton=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ref) ref="${2:?--ref needs a value}"; shift 2 ;;
+    --proton) proton="${2:?--proton needs a value}"; shift 2 ;;
+    *) sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+  esac
+done
+
+[[ -e "$repo_dir/dxvk/.git" ]] || {
+  echo "The dxvk submodule is missing. Run: git submodule update --init dxvk" >&2
+  exit 1
+}
+pinned="$(git -C "$repo_dir/dxvk" rev-parse HEAD)"
+if [[ -n "$proton" ]]; then
+  ref="$(proton_dxvk_commit "$proton")" || {
+    echo "Cannot tell which DXVK commit $proton ships. Pass --ref COMMIT." >&2
+    exit 1
+  }
+fi
+
+[[ -d "$work/.git" ]] || git clone -q --no-checkout "$repo_dir/dxvk" "$work"
+cd "$work"
+have() { git rev-parse -q --verify "$1^{commit}" >/dev/null 2>&1; }
+git fetch -q --tags origin HEAD
+want="${ref:-$pinned}"
+# A branch name always needs a fetch, a commit only when it is not here yet.
+if ! [[ "$want" =~ ^[0-9a-f]{7,40}$ ]] || ! have "$want"; then
+  git fetch -q --tags "$dxvk_upstream_url" '+refs/heads/*:refs/remotes/upstream/*'
+  if ! have "$want" && [[ "$want" =~ ^[0-9a-f]{40}$ ]]; then
+    git fetch -q "$dxvk_upstream_url" "$want" || true
+  fi
+fi
+base="$(git rev-parse -q --verify "upstream/$want^{commit}" || git rev-parse -q --verify "$want^{commit}")" || {
+  echo "DXVK has no commit, tag or branch '$want'." >&2
+  exit 1
+}
+base_version="$(git describe "$base")"
+
+# Fixed identity and date: the same base and patches give the same commits.
+export GIT_COMMITTER_NAME="vrchat-dfr-linux" GIT_COMMITTER_EMAIL="vrchat-dfr-linux@users.noreply.github.com"
+export GIT_COMMITTER_DATE="2000-01-01T00:00:00Z"
+git am -q --abort 2>/dev/null || true
+git checkout -q -f --detach "$base"
+if ! git am -q -3 "$repo_dir"/patches/dxvk/*.patch; then
+  git am -q --abort || true
+  echo "patches/dxvk does not apply to DXVK $base_version." >&2
   exit 1
 fi
+git submodule update -q --init --recursive
 
-cd "$source_dir"
+# DXVK takes its version string from `git describe`: tag the patched commit so
+# the DLL names its base commit and the revision of this repository.
+revision="$(git -C "$repo_dir" rev-parse --short HEAD)"
+[[ -z "$(git -C "$repo_dir" status --porcelain --ignore-submodules=all)" ]] || revision+="+"
+git tag -l '*-dfr.*' | xargs -r git tag -d >/dev/null
+git tag -a -m "gaze VRS on $base_version" "$base_version-dfr.$revision"
 
+out_dir="${DXVK_OUTPUT_DIR:-$repo_dir/dist/dxvk}"
+[[ "$base" == "$pinned" || -n "${DXVK_OUTPUT_DIR:-}" ]] || out_dir="$repo_dir/dist/dxvk-$base_version"
+build="build-${base:0:12}"
 setup_args=()
-if [[ -f build/meson-private/coredata.dat ]]; then
-  setup_args+=(--reconfigure)
-fi
-meson setup "${setup_args[@]}" build \
+[[ -f "$build/meson-private/coredata.dat" ]] && setup_args+=(--reconfigure)
+meson setup "${setup_args[@]}" "$build" \
   --cross-file build-win64.txt \
   -Dbuildtype=release \
   -Denable_d3d8=false \
   -Denable_d3d9=false \
   -Denable_d3d10=false
-ninja -C build -j "${DXVK_BUILD_JOBS:-4}"
+ninja -C "$build" -j "${DXVK_BUILD_JOBS:-4}"
 
 mkdir -p "$out_dir"
-cp build/src/d3d11/d3d11.dll "$out_dir/"
-cp build/src/dxgi/dxgi.dll "$out_dir/"
-printf '%s\n' "Built:" "$out_dir/d3d11.dll" "$out_dir/dxgi.dll"
+cp "$build/src/d3d11/d3d11.dll" "$build/src/dxgi/dxgi.dll" "$out_dir/"
+echo "Built DXVK $(git describe): $out_dir/d3d11.dll $out_dir/dxgi.dll"

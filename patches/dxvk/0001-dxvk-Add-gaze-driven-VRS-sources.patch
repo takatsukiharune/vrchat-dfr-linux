@@ -1,218 +1,35 @@
-diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
-index 38891eb0..8365daa1 100644
---- a/src/dxvk/dxvk_cmdlist.h
-+++ b/src/dxvk/dxvk_cmdlist.h
-@@ -1094,6 +1094,13 @@ namespace dxvk {
-     }
- 
- 
-+    void cmdSetFragmentShadingRate(
-+      const VkExtent2D*                 fragmentSize,
-+      const VkFragmentShadingRateCombinerOpKHR* combinerOps) {
-+      m_vkd->vkCmdSetFragmentShadingRateKHR(getCmdBuffer(), fragmentSize, combinerOps);
-+    }
-+
-+
-     void cmdSetDepthBias(
-             float                   depthBiasConstantFactor,
-             float                   depthBiasClamp,
-diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 66b2c539..a58b7623 100644
---- a/src/dxvk/dxvk_context.cpp
-+++ b/src/dxvk/dxvk_context.cpp
-@@ -7,6 +7,7 @@
- 
- #include "dxvk_device.h"
- #include "dxvk_context.h"
-+#include "dxvk_gaze_dot.h"
- 
- namespace dxvk {
-   
-@@ -6564,7 +6565,51 @@ namespace dxvk {
- 
-       m_cmd->beginSecondaryCommandBuffer(inheritance);
-     } else {
--      // Begin rendering right away on regular GPUs
-+      // Gaze-driven VRS: attach a shading rate image to eye passes
-+      bool gazeVrsActive = false;
-+
-+      if (dxvkGazeVrsEnabled(m_device.ptr())) {
-+        if (!m_gazeVrs)
-+          m_gazeVrs = std::make_unique<DxvkGazeVrs>(m_device.ptr());
-+
-+        auto& gazeInfo = m_state.om.renderingInfo.gazeVrs;
-+        gazeInfo = { VK_STRUCTURE_TYPE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_INFO_KHR };
-+
-+        const auto& gazeColor = framebufferInfo.getColorTarget(0u);
-+
-+        gazeVrsActive = m_gazeVrs->prepare(m_cmd.ptr(),
-+          VkExtent2D { fbSize.width, fbSize.height }, fbSize.layers,
-+          gazeColor.view ? gazeColor.view->info().format : VK_FORMAT_UNDEFINED,
-+          gazeColor.view ? gazeColor.view->image()->info().sampleCount : VK_SAMPLE_COUNT_1_BIT,
-+          gazeInfo);
-+
-+        if (gazeVrsActive) {
-+          renderingInfo.pNext = &gazeInfo;
-+
-+          static uint32_t gazeVpLogCount = 0u;
-+
-+          if (gazeVpLogCount < 20u) {
-+            gazeVpLogCount++;
-+
-+            const auto& gvp = m_state.vp.viewports[0];
-+            const auto& gsc = m_state.vp.scissorRects[0];
-+
-+            Logger::info(str::format("GazeVRS: pass fb ", fbSize.width, "x", fbSize.height,
-+              " viewport(x=", gvp.x, " y=", gvp.y, " w=", gvp.width, " h=", gvp.height, ")",
-+              " scissor(x=", gsc.offset.x, " y=", gsc.offset.y, " w=", gsc.extent.width, " h=", gsc.extent.height, ")",
-+              " viewports=", m_state.vp.viewportCount));
-+          }
-+        }
-+      }
-+
-+      if (m_gazeVrs) {
-+        VkExtent2D fragmentSize = { 1u, 1u };
-+        VkFragmentShadingRateCombinerOpKHR combiner[2] = {
-+          VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
-+          VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR };
-+        m_cmd->cmdSetFragmentShadingRate(&fragmentSize, combiner);
-+      }
-+
-       m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
-     }
- 
-@@ -6614,6 +6659,38 @@ namespace dxvk {
-       m_cmd->cmdExecuteCommands(1, &cmdBuffer);
-     }
- 
-+    if (g_gazeDot.passActive) {
-+      g_gazeDot.passActive = false;
-+
-+      for (uint32_t i = 0u; i < g_gazeDot.count && i < 16u; i++) {
-+        const auto& d = g_gazeDot.dots[i];
-+
-+        int32_t x0 = std::max(0, d.x - d.r);
-+        int32_t y0 = std::max(0, d.y - d.r);
-+        int32_t x1 = std::min(g_gazeDot.width,  d.x + d.r);
-+        int32_t y1 = std::min(g_gazeDot.height, d.y + d.r);
-+
-+        if (x1 <= x0 || y1 <= y0)
-+          continue;
-+
-+        VkClearAttachment dotClear = { };
-+        dotClear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-+        dotClear.colorAttachment = 0u;
-+        dotClear.clearValue.color.float32[0] = d.rgb[0];
-+        dotClear.clearValue.color.float32[1] = d.rgb[1];
-+        dotClear.clearValue.color.float32[2] = d.rgb[2];
-+        dotClear.clearValue.color.float32[3] = 1.0f;
-+
-+        VkClearRect dotRect = { };
-+        dotRect.rect.offset = { x0, y0 };
-+        dotRect.rect.extent = { uint32_t(x1 - x0), uint32_t(y1 - y0) };
-+        dotRect.baseArrayLayer = 0u;
-+        dotRect.layerCount = 1u;
-+
-+        m_cmd->cmdClearAttachments(DxvkCmdBuffer::ExecBuffer, 1, &dotClear, 1, &dotRect);
-+      }
-+    }
-+
-     // End actual rendering command
-     m_cmd->cmdEndRendering(DxvkCmdBuffer::ExecBuffer);
- 
-diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index 1e9780f2..05b8250c 100644
---- a/src/dxvk/dxvk_context.h
-+++ b/src/dxvk/dxvk_context.h
-@@ -6,6 +6,7 @@
- #include "dxvk_context_state.h"
- #include "dxvk_descriptor_heap.h"
- #include "dxvk_descriptor_worker.h"
-+#include "dxvk_gaze_vrs.h"
- #include "dxvk_implicit_resolve.h"
- #include "dxvk_latency.h"
- #include "dxvk_objects.h"
-@@ -1334,6 +1335,7 @@ namespace dxvk {
-   private:
-     
-     Rc<DxvkDevice>          m_device;
-+    std::unique_ptr<DxvkGazeVrs> m_gazeVrs;
-     DxvkObjects*            m_common;
- 
-     uint64_t                m_frameCount = 0u;
-diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
-index 7e3d16a7..a33d6b43 100644
---- a/src/dxvk/dxvk_device_info.cpp
-+++ b/src/dxvk/dxvk_device_info.cpp
-@@ -48,6 +48,7 @@ namespace dxvk {
-     HANDLE_EXT(khrDeviceFault);                    \
-     HANDLE_EXT(khrDynamicRenderingLocalRead);      \
-     HANDLE_EXT(khrExternalMemoryWin32);            \
-+    HANDLE_EXT(khrFragmentShadingRate);            \
-     HANDLE_EXT(khrExternalSemaphoreWin32);         \
-     HANDLE_EXT(khrIncrementalPresent);             \
-     HANDLE_EXT(khrLoadStoreOpNone);                \
-@@ -93,6 +94,7 @@ namespace dxvk {
-     HANDLE_EXT(extTransformFeedback);              \
-     HANDLE_EXT(extVertexAttributeDivisor);         \
-     HANDLE_EXT(khrDeviceFault);                    \
-+    HANDLE_EXT(khrFragmentShadingRate);            \
-     HANDLE_EXT(khrMaintenance5);                   \
-     HANDLE_EXT(khrMaintenance6);                   \
-     HANDLE_EXT(khrMaintenance7);                   \
-@@ -1044,6 +1046,9 @@ namespace dxvk {
-       ENABLE_EXT_FEATURE(khrDeviceFault, deviceFault, false),
-       ENABLE_EXT_FEATURE(khrDeviceFault, deviceFaultVendorBinary, false),
- 
-+      /* Gaze-driven VRS */
-+      ENABLE_EXT_FEATURE(khrFragmentShadingRate, attachmentFragmentShadingRate, false),
-+
-       /* Tiler stuff */
-       ENABLE_EXT_FEATURE(khrDynamicRenderingLocalRead, dynamicRenderingLocalRead, false),
- 
-diff --git a/src/dxvk/dxvk_device_info.h b/src/dxvk/dxvk_device_info.h
-index a6af2a40..164bf851 100644
---- a/src/dxvk/dxvk_device_info.h
-+++ b/src/dxvk/dxvk_device_info.h
-@@ -38,6 +38,7 @@ namespace dxvk {
-     VkPhysicalDeviceSampleLocationsPropertiesEXT              extSampleLocations              = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLE_LOCATIONS_PROPERTIES_EXT };
-     VkPhysicalDeviceTransformFeedbackPropertiesEXT            extTransformFeedback            = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_PROPERTIES_EXT };
-     VkPhysicalDeviceVertexAttributeDivisorPropertiesEXT       extVertexAttributeDivisor       = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_EXT };
-+    VkPhysicalDeviceFragmentShadingRatePropertiesKHR          khrFragmentShadingRate          = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_PROPERTIES_KHR };
-     VkPhysicalDeviceFaultPropertiesKHR                        khrDeviceFault                  = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_PROPERTIES_KHR };
-     VkPhysicalDeviceMaintenance5PropertiesKHR                 khrMaintenance5                 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR };
-     VkPhysicalDeviceMaintenance6PropertiesKHR                 khrMaintenance6                 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_PROPERTIES_KHR };
-@@ -90,6 +91,7 @@ namespace dxvk {
-     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT         extVertexAttributeDivisor       = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES };
-     VkBool32                                                  khrCalibratedTimestamps         = VK_FALSE;
-     VkPhysicalDeviceFaultFeaturesKHR                          khrDeviceFault                  = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_KHR };
-+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR            khrFragmentShadingRate          = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR };
-     VkPhysicalDeviceDynamicRenderingLocalReadFeatures         khrDynamicRenderingLocalRead    = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR };
-     VkBool32                                                  khrExternalMemoryWin32          = VK_FALSE;
-     VkBool32                                                  khrExternalSemaphoreWin32       = VK_FALSE;
-@@ -168,6 +170,7 @@ namespace dxvk {
-     VkExtensionProperties extVertexAttributeDivisor         = vk::makeExtension(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME);
-     VkExtensionProperties khrCalibratedTimestamps           = vk::makeExtension(VK_KHR_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
-     VkExtensionProperties khrDeviceFault                    = vk::makeExtension(VK_KHR_DEVICE_FAULT_EXTENSION_NAME);
-+    VkExtensionProperties khrFragmentShadingRate            = vk::makeExtension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
-     VkExtensionProperties khrDynamicRenderingLocalRead      = vk::makeExtension(VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
-     VkExtensionProperties khrExternalMemoryWin32            = vk::makeExtension(VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME);
-     VkExtensionProperties khrExternalSemaphoreWin32         = vk::makeExtension(VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME);
-diff --git a/src/dxvk/dxvk_framebuffer.h b/src/dxvk/dxvk_framebuffer.h
-index 76642cda..7f0e3bfd 100644
---- a/src/dxvk/dxvk_framebuffer.h
-+++ b/src/dxvk/dxvk_framebuffer.h
-@@ -70,6 +70,7 @@ namespace dxvk {
-     VkRenderingAttachmentInfo depth = { };
-     VkRenderingAttachmentInfo stencil = { };
-     VkRenderingInfo rendering = { };
-+    VkRenderingFragmentShadingRateAttachmentInfoKHR gazeVrs = { };
-   };
- 
- 
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: vrchat-dfr-linux contributors
+ <vrchat-dfr-linux@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 00:00:00 +0000
+Subject: [PATCH 1/2] [dxvk] Add gaze-driven VRS sources
+
+Gaze shared-memory reader, settings, tile-map worker and the Vulkan
+shading-rate attachment. Nothing references these files yet.
+---
+ src/dxvk/dxvk_gaze_buffer.h   |  42 ++
+ src/dxvk/dxvk_gaze_config.h   | 341 ++++++++++++++++
+ src/dxvk/dxvk_gaze_dot.h      |  31 ++
+ src/dxvk/dxvk_gaze_map.h      | 192 +++++++++
+ src/dxvk/dxvk_gaze_shm.h      |  76 ++++
+ src/dxvk/dxvk_gaze_source.cpp | 281 ++++++++++++++
+ src/dxvk/dxvk_gaze_source.h   |  56 +++
+ src/dxvk/dxvk_gaze_vrs.cpp    | 712 ++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_gaze_vrs.h      | 101 +++++
+ 9 files changed, 1832 insertions(+)
+ create mode 100644 src/dxvk/dxvk_gaze_buffer.h
+ create mode 100644 src/dxvk/dxvk_gaze_config.h
+ create mode 100644 src/dxvk/dxvk_gaze_dot.h
+ create mode 100644 src/dxvk/dxvk_gaze_map.h
+ create mode 100644 src/dxvk/dxvk_gaze_shm.h
+ create mode 100644 src/dxvk/dxvk_gaze_source.cpp
+ create mode 100644 src/dxvk/dxvk_gaze_source.h
+ create mode 100644 src/dxvk/dxvk_gaze_vrs.cpp
+ create mode 100644 src/dxvk/dxvk_gaze_vrs.h
+
 diff --git a/src/dxvk/dxvk_gaze_buffer.h b/src/dxvk/dxvk_gaze_buffer.h
 new file mode 100644
-index 00000000..f5407168
+index 0000000000000000000000000000000000000000..f5407168362718cbbd89e3d181121cba23275a0f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_buffer.h
 @@ -0,0 +1,42 @@
@@ -260,7 +77,7 @@ index 00000000..f5407168
 +}
 diff --git a/src/dxvk/dxvk_gaze_config.h b/src/dxvk/dxvk_gaze_config.h
 new file mode 100644
-index 00000000..12a7f2bc
+index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f149459cadb
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_config.h
 @@ -0,0 +1,341 @@
@@ -607,7 +424,7 @@ index 00000000..12a7f2bc
 +}
 diff --git a/src/dxvk/dxvk_gaze_dot.h b/src/dxvk/dxvk_gaze_dot.h
 new file mode 100644
-index 00000000..71ccea17
+index 0000000000000000000000000000000000000000..71ccea173ad3aeef185dd74e3a582e537b05406c
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_dot.h
 @@ -0,0 +1,31 @@
@@ -645,7 +462,7 @@ index 00000000..71ccea17
 \ No newline at end of file
 diff --git a/src/dxvk/dxvk_gaze_map.h b/src/dxvk/dxvk_gaze_map.h
 new file mode 100644
-index 00000000..92d164de
+index 0000000000000000000000000000000000000000..92d164de0e602c99dd48c7ed88b7cab8c94e2f40
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_map.h
 @@ -0,0 +1,192 @@
@@ -843,7 +660,7 @@ index 00000000..92d164de
 +}
 diff --git a/src/dxvk/dxvk_gaze_shm.h b/src/dxvk/dxvk_gaze_shm.h
 new file mode 100644
-index 00000000..5154df19
+index 0000000000000000000000000000000000000000..5154df1919a69cf126a92505ca22aa898705e20f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_shm.h
 @@ -0,0 +1,76 @@
@@ -925,7 +742,7 @@ index 00000000..5154df19
 +} // namespace gaze_bridge
 diff --git a/src/dxvk/dxvk_gaze_source.cpp b/src/dxvk/dxvk_gaze_source.cpp
 new file mode 100644
-index 00000000..713a0b4f
+index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd2269203e7bbcd
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.cpp
 @@ -0,0 +1,281 @@
@@ -1212,7 +1029,7 @@ index 00000000..713a0b4f
 +}
 diff --git a/src/dxvk/dxvk_gaze_source.h b/src/dxvk/dxvk_gaze_source.h
 new file mode 100644
-index 00000000..9bccf78f
+index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda6c0fa49c
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.h
 @@ -0,0 +1,56 @@
@@ -1274,7 +1091,7 @@ index 00000000..9bccf78f
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 00000000..b83e6558
+index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c08237de835f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
 @@ -0,0 +1,712 @@
@@ -1992,7 +1809,7 @@ index 00000000..b83e6558
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.h b/src/dxvk/dxvk_gaze_vrs.h
 new file mode 100644
-index 00000000..9f4ebdcf
+index 0000000000000000000000000000000000000000..9f4ebdcf55b06164283b462dcf0559bb112c4dd8
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.h
 @@ -0,0 +1,101 @@
@@ -2097,172 +1914,3 @@ index 00000000..9f4ebdcf
 +  };
 +
 +}
-diff --git a/src/dxvk/dxvk_graphics.cpp b/src/dxvk/dxvk_graphics.cpp
-index f40b6ec2..2d79bf9e 100644
---- a/src/dxvk/dxvk_graphics.cpp
-+++ b/src/dxvk/dxvk_graphics.cpp
-@@ -3,6 +3,7 @@
- #include "../util/util_time.h"
- 
- #include "dxvk_device.h"
-+#include "dxvk_gaze_vrs.h"
- #include "dxvk_graphics.h"
- #include "dxvk_pipemanager.h"
- 
-@@ -502,6 +503,9 @@ namespace dxvk {
-     if (state.cbUseDynamicBlendConstants)
-       dynamicStates.push_back(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
- 
-+    if (dxvkGazeVrsEnabled(m_device))
-+      dynamicStates.push_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
-+
-     VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
- 
-     if (!dynamicStates.empty()) {
-@@ -526,6 +530,10 @@ namespace dxvk {
-     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &state.rtInfo };
-     flags.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR;
- 
-+    // Required for every pipeline drawn in a pass with a shading rate attachment.
-+    if (dxvkGazeVrsEnabled(m_device))
-+      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-+
-     if (state.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
-       flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
- 
-@@ -821,6 +829,9 @@ namespace dxvk {
-       }
-     }
- 
-+    if (dxvkGazeVrsEnabled(device))
-+      dyStates[dyInfo.dynamicStateCount++] = VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR;
-+
-     if (dyInfo.dynamicStateCount)
-       dyInfo.pDynamicStates = dyStates.data();
-   }
-@@ -1386,6 +1397,10 @@ namespace dxvk {
-     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
-     flags.flags = vs.linkFlags | fs.linkFlags;
- 
-+    // Required for every pipeline drawn in a pass with a shading rate attachment.
-+    if (dxvkGazeVrsEnabled(m_device))
-+      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-+
-     if (m_device->canUseDescriptorHeap())
-       flags.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
- 
-@@ -1470,6 +1485,10 @@ namespace dxvk {
- 
-     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
- 
-+    // Required for every pipeline drawn in a pass with a shading rate attachment.
-+    if (dxvkGazeVrsEnabled(m_device))
-+      flags.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-+
-     if (!m_flags.test(DxvkGraphicsPipelineFlag::HasRasterizerDiscard)) {
-       if (key.foState.feedbackLoop & VK_IMAGE_ASPECT_COLOR_BIT)
-         flags.flags |= VK_PIPELINE_CREATE_2_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-diff --git a/src/dxvk/dxvk_graphics.h b/src/dxvk/dxvk_graphics.h
-index 98eea481..c00cb29a 100644
---- a/src/dxvk/dxvk_graphics.h
-+++ b/src/dxvk/dxvk_graphics.h
-@@ -223,7 +223,7 @@ namespace dxvk {
-             DxvkGraphicsPipelineFlags       flags);
- 
-     VkPipelineDynamicStateCreateInfo  dyInfo    = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
--    std::array<VkDynamicState, 20>    dyStates  = { };
-+    std::array<VkDynamicState, 24>    dyStates  = { };
- 
-     bool eq(const DxvkGraphicsPipelineDynamicState& other) const;
- 
-diff --git a/src/dxvk/dxvk_shader.cpp b/src/dxvk/dxvk_shader.cpp
-index a133519d..270c6474 100644
---- a/src/dxvk/dxvk_shader.cpp
-+++ b/src/dxvk/dxvk_shader.cpp
-@@ -1,4 +1,5 @@
- #include "dxvk_device.h"
-+#include "dxvk_gaze_vrs.h"
- #include "dxvk_pipemanager.h"
- #include "dxvk_shader.h"
- #include "dxvk_shader_io.h"
-@@ -375,6 +376,9 @@ namespace dxvk {
-     if (m_device->features().extExtendedDynamicState3.extendedDynamicState3DepthClipEnable)
-       dynamicStates.push_back(VK_DYNAMIC_STATE_DEPTH_CLIP_ENABLE_EXT);
- 
-+    if (dxvkGazeVrsEnabled(m_device))
-+      dynamicStates.push_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
-+
-     VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-     dyInfo.dynamicStateCount  = dynamicStates.size();
-     dyInfo.pDynamicStates     = dynamicStates.data();
-@@ -412,6 +416,10 @@ namespace dxvk {
-     VkPipelineCreateFlags2CreateInfo flagsInfo = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &rtInfo };
-     flagsInfo.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR | flags;
- 
-+    // Required for every pipeline drawn in a pass with a shading rate attachment.
-+    if (dxvkGazeVrsEnabled(m_device))
-+      flagsInfo.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-+
-     if (m_device->canUseDescriptorHeap())
-       flagsInfo.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
- 
-@@ -487,6 +495,9 @@ namespace dxvk {
-       dynamicStates.push_back(VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT);
-     }
- 
-+    if (dxvkGazeVrsEnabled(m_device))
-+      dynamicStates.push_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
-+
-     VkPipelineDynamicStateCreateInfo dyInfo = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
-     dyInfo.dynamicStateCount  = dynamicStates.size();
-     dyInfo.pDynamicStates     = dynamicStates.data();
-@@ -515,6 +526,10 @@ namespace dxvk {
-     VkPipelineCreateFlags2CreateInfo flagsInfo = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO, &rtInfo };
-     flagsInfo.flags = VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR | flags;
- 
-+    // Required for every pipeline drawn in a pass with a shading rate attachment.
-+    if (dxvkGazeVrsEnabled(m_device))
-+      flagsInfo.flags |= VK_PIPELINE_CREATE_2_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR;
-+
-     if (m_device->canUseDescriptorHeap())
-       flagsInfo.flags |= VK_PIPELINE_CREATE_2_DESCRIPTOR_HEAP_BIT_EXT;
- 
-diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
-index 6b12f95c..27f9bc5a 100644
---- a/src/dxvk/meson.build
-+++ b/src/dxvk/meson.build
-@@ -50,6 +50,8 @@ dxvk_src = [
-   'dxvk_gpu_event.cpp',
-   'dxvk_gpu_query.cpp',
-   'dxvk_graphics.cpp',
-+  'dxvk_gaze_vrs.cpp',
-+  'dxvk_gaze_source.cpp',
-   'dxvk_hang.cpp',
-   'dxvk_image.cpp',
-   'dxvk_implicit_resolve.cpp',
-diff --git a/src/vulkan/vulkan_loader.h b/src/vulkan/vulkan_loader.h
-index c24698c5..1793d87a 100644
---- a/src/vulkan/vulkan_loader.h
-+++ b/src/vulkan/vulkan_loader.h
-@@ -179,6 +179,10 @@ namespace dxvk::vk {
-     #ifdef VK_EXT_sample_locations
-     VULKAN_FN(vkGetPhysicalDeviceMultisamplePropertiesEXT);
-     #endif
-+
-+    #ifdef VK_KHR_fragment_shading_rate
-+    VULKAN_FN(vkGetPhysicalDeviceFragmentShadingRatesKHR);
-+    #endif
-   };
-   
-   
-@@ -458,6 +462,10 @@ namespace dxvk::vk {
-     VULKAN_FN(vkCmdSetSampleLocationsEXT);
-     #endif
- 
-+    #ifdef VK_KHR_fragment_shading_rate
-+    VULKAN_FN(vkCmdSetFragmentShadingRateKHR);
-+    #endif
-+
-     #ifdef VK_EXT_shader_module_identifier
-     VULKAN_FN(vkGetShaderModuleCreateInfoIdentifierEXT);
-     VULKAN_FN(vkGetShaderModuleIdentifierEXT);
