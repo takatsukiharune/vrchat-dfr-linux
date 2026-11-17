@@ -12,9 +12,7 @@ jobs:
       - name: Validate patch structure
         run: |
           git apply --numstat patches/dxvk-gaze-vrs.patch
-          git apply --numstat patches/wivrn-gaze-export.patch
           test -s patches/dxvk-gaze-vrs.patch
-          test -s patches/wivrn-gaze-export.patch
       - name: Install gaze test dependencies
         run: |
           sudo apt-get update

@@ -5,8 +5,6 @@ and patches for third-party projects.
 - Patches to DXVK (https://github.com/doitsujin/dxvk): zlib/libpng license,
   the same as DXVK. Binaries built from these patches are modified versions
   of DXVK, not the original.
-- Patches to WiVRn (https://github.com/WiVRn/WiVRn): GPL-3.0-or-later, the
-  same as WiVRn.
 
 This repository does not relicense the upstream projects.
 

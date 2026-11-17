@@ -134,7 +134,7 @@ jobs:
             Experimental gaze-driven VRS build.
 
             - DXVK base: `${{ inputs.dxvk_ref || 'DXVK_COMMIT in versions.env' }}`
-            - Gaze: native Linux OpenXR headless bridge (no WiVRn export patch required)
+            - Gaze: native Linux OpenXR headless bridge for an unmodified OpenXR runtime
 
             See README for install and VRChat launch configuration.
           files: |

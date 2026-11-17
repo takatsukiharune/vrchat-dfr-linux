@@ -1,13 +1,19 @@
-# WiVRn + DXVK Gaze-Driven VRS
+# OpenXR + DXVK Gaze-Driven VRS
 
-Gaze-driven variable rate shading (dynamic foveated rendering) for VRChat over
-WiVRn. It also works for other DXVK applications.
+Gaze-driven variable rate shading (dynamic foveated rendering) for VRChat on
+Linux. It also works for other DXVK applications.
 
 A separate native Linux process reads gaze through standard OpenXR
 (`XR_EXT_eye_gaze_interaction` with `XR_MND_headless`) and publishes per-eye
 centers to `/dev/shm/vrchat_dfr_gaze`. Patched DXVK reads this shared memory
 and builds a Vulkan fragment-shading-rate attachment around the gaze point.
-WiVRn's gaze-export patch and changes to xrizer are not required.
+This project does not modify the OpenXR runtime or xrizer.
+
+The bridge needs an OpenXR runtime with `XR_MND_headless`,
+`XR_EXT_eye_gaze_interaction` and `XR_KHR_convert_timespec_time`. The runtime
+must let the bridge run as a second application next to the game, and the
+headset must send eye tracking to it. `./build/openxr-gaze-probe` lists whether
+a runtime has the extensions. We have tested only WiVRn.
 
 ## Status
 
@@ -38,7 +44,7 @@ multiple foveation spots. These are the tested values, not universal
 requirements.
 
 > [!WARNING]
-> Use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, WiVRn or DXVK. It replaces `d3d11.dll` and `dxgi.dll` in your Proton install, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how.  
+> Use at your own risk. This is an unofficial modification, not endorsed by or affiliated with VRChat, DXVK or any OpenXR runtime. It replaces `d3d11.dll` and `dxgi.dll` in your Proton install, and VRChat's rules or anti-cheat may treat modified clients differently. I haven't verified how.  
 > I also recommend against using MSAA/Anti-Aliasing in VRChat with this, as increasing the MSAA sample count can limit the maximum VRS coarse rate available on some GPUs. For better image quality, use a higher render resolution instead.
 
 ## Install
@@ -67,15 +73,14 @@ without it the patched DLLs run none of the gaze code.
 bash scripts/setup-dev.sh
 bash scripts/build-dxvk.sh
 
-# Connect the HMD to your normal WiVRn server, with eye tracking enabled.
+# Start your OpenXR runtime and connect the HMD, with eye tracking enabled.
 ./dist/gaze/openxr-gaze-bridge --verbose
 ```
 
 Keep the bridge running while playing. It reconnects to OpenXR every 2 seconds
-when the runtime or HMD is unavailable. Ctrl-C stops it. A matching WiVRn
-server/headset client is still required, but the server does not need the
-custom gaze-export patch. If needed, set `XR_RUNTIME_JSON` to your WiVRn
-OpenXR runtime manifest for the bridge process.
+when the runtime or HMD is unavailable. Ctrl-C stops it. If the bridge does
+not find the runtime by itself, set `XR_RUNTIME_JSON` to the runtime's OpenXR
+manifest for the bridge process.
 
 The bridge polls at 250 Hz. OpenXR provides one combined gaze ray; each eye's
 pose and FOV are used to project it independently. The default assumes infinite
@@ -160,9 +165,9 @@ Verify the shared-memory file exists while a session is up:
 
     ls -l /dev/shm/vrchat_dfr_gaze
 
-The shared format is versioned and incompatible with the old `wivrn_gaze`
-export. DXVK treats invalid data, or a heartbeat stopped for 100 ms, as
-tracking loss (see above). It waits for a sequence change before accepting a
+The shared format is versioned and incompatible with the `wivrn_gaze`
+export of earlier versions. DXVK treats invalid data, or a heartbeat stopped
+for 100 ms, as tracking loss (see above). It waits for a sequence change before accepting a
 newly mapped file. After a stale mapping is closed, reopening may take up to
 2 seconds.
 
@@ -260,10 +265,6 @@ tracking state. For the new publisher, `./dist/gaze/openxr-gaze-bridge
 --seconds 15 --verbose` exercises gaze-to-UV conversion and shared-memory output.
 Both timed commands return 1 if no valid sample was observed.
 
-The original `build-wivrn.sh`, `apply-wivrn.sh` and
-`patches/wivrn-gaze-export.patch` are retained as historical tooling and are
-not part of this build or the current data path.
-
 See [architecture](docs/architecture.md) for the protocol and failure behavior,
 and [the investigation](docs/eye-tracking-investigation.md) for the alternative
 OpenVR / existing-session route and its unresolved integration questions.
@@ -273,7 +274,7 @@ OpenVR / existing-session route and its unresolved integration questions.
     Eye tracking
           |
           v
-    Unmodified WiVRn OpenXR runtime
+    Unmodified OpenXR runtime
           |
           v
     openxr-gaze-bridge (Linux headless process)
@@ -292,16 +293,13 @@ OpenVR / existing-session route and its unresolved integration questions.
 
 ## Notes
 
-- The DXVK patch now uses the OpenXR bridge protocol. The WiVRn patch is retained
-  for historical reference only.
 - `fmt=97` and `FLIP_Y=1` are the values that work for VRChat; other
   applications need their own (`dfrctl set debug 1` lists the passes in the
   DXVK log).
 - A sample systemd user unit for the bridge is in
   [`contrib/openxr-gaze-bridge.service`](contrib/openxr-gaze-bridge.service).
-- Revisions: DXVK `0cfe0898`, WiVRn `v26.9` / `bbc6e4c` (see
-  `versions.env`). The DXVK patch records its parent blob hashes, so the
-  DXVK ref must match exactly.
+- Revision: DXVK `0cfe0898` (see `versions.env`). The DXVK patch records its
+  parent blob hashes, so the DXVK ref must match exactly.
 
 ## Demo with overexadurated values and gaze dot enabled
 [Google drive link](https://drive.google.com/file/d/1OabrqSbzjEp96AFs6StbJrUAcHWSyMiQ/view?usp=sharing)

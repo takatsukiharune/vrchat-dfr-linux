@@ -24,8 +24,8 @@ to image bounds. Invalid poses, FOVs and rays behind an eye invalidate gaze.
 The default output is `/dev/shm/vrchat_dfr_gaze`. DXVK maps it through Wine as
 `Z:\dev\shm\vrchat_dfr_gaze`; `--file` and `DXVK_GAZE_FILE` override the host
 and Wine paths. Containers must expose the same file to both processes.
-The reader does not load OpenVR/OpenXR or depend on xrizer changes. WiVRn's
-normal OpenXR interface supplies data without its gaze-export patch.
+The reader does not load OpenVR/OpenXR or depend on xrizer changes. The
+runtime's standard OpenXR interface supplies the data without a runtime patch.
 
 ## Shared memory protocol
 
@@ -57,7 +57,7 @@ The output is a regular file owned by the current user, mode 0600. Existing
 files must have size zero or exactly 64. The writer keeps the inode and
 sequence across restarts, rather than unlinking/replacing it. It repairs an odd
 sequence left by a killed writer. Symlinks and simultaneous writers are
-rejected. The old WiVRn `GAZE` format is incompatible and not accepted.
+rejected. The `GAZE` format of the earlier WiVRn export patch is not accepted.
 
 ## Failure and restart behavior
 
