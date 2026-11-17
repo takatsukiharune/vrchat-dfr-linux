@@ -1,148 +1,148 @@
 #!/usr/bin/env bash
+# Installs the patched d3d11.dll and dxgi.dll for one Proton build.
+#
+#   install-dxvk.sh [options] PROTON     PROTON is a directory or the name of a Proton build
+#   install-dxvk.sh                      list the Proton builds found
+#
+# Default: copy PROTON to <name>-dfr beside Steam's other compatibility tools
+# and patch the copy. PROTON itself is not changed. Select <name>-dfr for the
+# game in Steam (restart Steam to see it).
+#
+#   --in-place         patch PROTON itself and keep its DLLs as d3d11.dll.stock and dxgi.dll.stock
+#   --refresh          copy PROTON again when it changed after <name>-dfr was made
+#   --dxvk-from PATH   directory or .zip with d3d11.dll and dxgi.dll
+#                      (default: the build in dist/ that matches PROTON's DXVK commit)
+#   --force            install DLLs built from a different DXVK commit than PROTON ships
+#   --tools-dir DIR    where <name>-dfr goes (default: Steam's compatibilitytools.d)
 set -euo pipefail
-
-# Replace a (possibly read-only) DLL without touching its permissions: write a
-# temp file beside it, copy the original's mode, and rename it into place.
-replace_dll() {
-  local src="$1" dst="$2" tmp
-  tmp="$(mktemp "$dst.XXXXXX")"
-  if ! { cp "$src" "$tmp" && chmod --reference="$dst" "$tmp" && mv -f "$tmp" "$dst"; }; then
-    rm -f "$tmp"
-    return 1
-  fi
-}
-
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_dir/scripts/lib.sh"
 
-dxvk_from="${DXVK_FROM:-${DXVK_OUTPUT_DIR:-}}"
-proton_dir="${PROTON_DIR:-}"
-backup_dir="${DXVK_BACKUP_DIR:-}"
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die() { echo "$*" >&2; exit 1; }
 
-usage() {
-  cat >&2 <<'EOF'
-Usage: install-dxvk.sh [--dxvk-from PATH] /path/to/Proton
-
-  --dxvk-from PATH   Where the patched DLLs come from. PATH may be:
-                       - a directory containing d3d11.dll and dxgi.dll
-                       - a .zip archive containing them (e.g. dxvk-gaze-vrs.zip
-                         downloaded from the GitHub Release)
-                     If omitted, defaults to $DXVK_FROM, $DXVK_OUTPUT_DIR,
-                     or <repo>/dist/dxvk for a local build.
-
-Environment:
-  PROTON_DIR         Proton directory (used if no positional argument).
-  DXVK_FROM          Default value for --dxvk-from.
-  DXVK_OUTPUT_DIR    Fallback DLL source for a local build.
-  DXVK_BACKUP_DIR    Where to store the timestamped backup.
-
-Examples:
-  # Local build
-  ./scripts/install-dxvk.sh "/path/to/Proton"
-
-  # Downloaded release zip
-  ./scripts/install-dxvk.sh --dxvk-from ./dxvk-gaze-vrs.zip "/path/to/Proton"
-
-  # Already-unzipped release folder
-  ./scripts/install-dxvk.sh --dxvk-from ./dxvk-gaze-vrs "/path/to/Proton"
-EOF
-  exit 2
-}
-
+in_place=0 refresh=0 force=0 dxvk_from="${DXVK_FROM:-}" tools_dir="" proton=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dxvk-from)
-      [[ -n "${2:-}" ]] || { echo "--dxvk-from needs a value" >&2; usage; }
-      dxvk_from="$2"
-      shift 2
-      ;;
-    -h|--help)
-      usage
-      ;;
-    --)
-      shift
-      break
-      ;;
-    -*)
-      echo "Unknown option: $1" >&2
-      usage
-      ;;
-    *)
-      if [[ -z "$proton_dir" ]]; then
-        proton_dir="$1"
-      else
-        echo "Unexpected argument: $1" >&2
-        usage
-      fi
-      shift
-      ;;
+    --in-place) in_place=1; shift ;;
+    --refresh) refresh=1; shift ;;
+    --force) force=1; shift ;;
+    --dxvk-from) dxvk_from="${2:?--dxvk-from needs a value}"; shift 2 ;;
+    --tools-dir) tools_dir="${2:?--tools-dir needs a value}"; shift 2 ;;
+    -h|--help) usage ;;
+    -*) echo "Unknown option: $1" >&2; usage ;;
+    *) [[ -z "$proton" ]] || usage; proton="$1"; shift ;;
   esac
 done
-
-proton_dir="${proton_dir:-${PROTON_DIR:-}}"
-backup_dir="${backup_dir:-$repo_dir/.backup/dxvk-$(date +%Y%m%d-%H%M%S)}"
-
-[[ -n "$proton_dir" && -d "$proton_dir" ]] || usage
-
-# If no source given, prefer a local build in <repo>/dist/dxvk.
-if [[ -z "$dxvk_from" && -f "$repo_dir/dist/dxvk/d3d11.dll" && -f "$repo_dir/dist/dxvk/dxgi.dll" ]]; then
-  dxvk_from="$repo_dir/dist/dxvk"
+if [[ -z "$proton" ]]; then
+  echo "Proton builds found:"
+  list_proton_installs
+  usage
 fi
+source_dir="$(resolve_proton "$proton")" || die "No Proton build '$proton'. Run without arguments to list them."
+[[ -f "$(proton_dxvk_dir "$source_dir")/d3d11.dll" ]] || die "No DXVK in $source_dir."
 
-[[ -n "$dxvk_from" ]] || {
-  echo "No DXVK source given, and no local build found at $repo_dir/dist/dxvk." >&2
-  echo "Pass --dxvk-from /path/to/dxvk-gaze-vrs.zip (or a directory)." >&2
-  exit 1
-}
-
-tmp_extract=""
-cleanup() { if [[ -n "$tmp_extract" && -d "$tmp_extract" ]]; then rm -rf "$tmp_extract"; fi; }
-trap cleanup EXIT
-
-# If source is a .zip, extract and locate the folder containing both DLLs.
-if [[ -f "$dxvk_from" && "$dxvk_from" == *.zip ]]; then
-  command -v unzip >/dev/null 2>&1 || { echo "unzip is required to read $dxvk_from" >&2; exit 1; }
-  tmp_extract="$(mktemp -d)"
-  unzip -q "$dxvk_from" -d "$tmp_extract"
-  if [[ -f "$tmp_extract/d3d11.dll" && -f "$tmp_extract/dxgi.dll" ]]; then
-    dxvk_from="$tmp_extract"
-  else
-    found=""
-    while IFS= read -r d; do
-      if [[ -f "$d/d3d11.dll" && -f "$d/dxgi.dll" ]]; then
-        found="$d"; break
-      fi
-    done < <(find "$tmp_extract" -type d | sort)
-    if [[ -z "$found" ]]; then
-      echo "Archive $dxvk_from does not contain d3d11.dll and dxgi.dll together." >&2
-      find "$tmp_extract" -type f -name '*.dll' >&2 || true
-      exit 1
-    fi
-    dxvk_from="$found"
+# Where the DLLs go: a copy made earlier, the build itself, or a new copy.
+origin="$source_dir"
+if [[ -f "$source_dir/.dfr-clone" ]]; then
+  dest="$source_dir"
+  origin="$(cat "$source_dir/.dfr-clone")"
+elif (( in_place )); then
+  dest="$source_dir"
+else
+  if [[ -z "$tools_dir" ]]; then
+    tools_dir="$(steam_roots | head -n1)/compatibilitytools.d"
+    [[ "$tools_dir" != "/compatibilitytools.d" ]] || die "Steam not found. Pass --tools-dir DIR."
+  fi
+  name="$(basename "$source_dir" | tr ' ' '-')-dfr"
+  dest="$tools_dir/$name"
+  if [[ -e "$dest" && ! -f "$dest/.dfr-clone" ]]; then
+    die "$dest exists and was not made by this script. Remove it, or patch it with: $0 --in-place '$dest'"
   fi
 fi
 
-[[ -d "$dxvk_from" ]] || { echo "DXVK source '$dxvk_from' is not a directory or .zip." >&2; exit 1; }
-[[ -f "$dxvk_from/d3d11.dll" && -f "$dxvk_from/dxgi.dll" ]] || {
-  echo "Missing d3d11.dll and/or dxgi.dll in $dxvk_from." >&2
-  exit 1
+commit="$(proton_dxvk_commit "$origin" 2>/dev/null || proton_dxvk_commit "$dest" 2>/dev/null || true)"
+
+if [[ -z "$dxvk_from" ]]; then
+  for dir in "$repo_dir"/dist/dxvk*/; do
+    [[ -f "$dir/d3d11.dll" && -f "$dir/dxgi.dll" ]] || continue
+    if same_commit "$commit" "$(version_commit "$(dll_dxvk_version "$dir/d3d11.dll")")"; then dxvk_from="${dir%/}"; break; fi
+  done
+  [[ -n "$dxvk_from" ]] || die "No build in $repo_dir/dist matches DXVK ${commit:-of this Proton build}.
+Build it with: scripts/dev-container.sh build --proton '$origin'"
+fi
+
+extracted=""
+staging=""
+cleanup() { rm -rf "$extracted" "$staging"; }
+trap cleanup EXIT
+if [[ -f "$dxvk_from" && "$dxvk_from" == *.zip ]]; then
+  command -v unzip >/dev/null || die "unzip is required to read $dxvk_from"
+  extracted="$(mktemp -d)"
+  unzip -q "$dxvk_from" -d "$extracted"
+  dxvk_from="$(dirname "$(find "$extracted" -name d3d11.dll | sort | head -n1)")"
+fi
+[[ -f "$dxvk_from/d3d11.dll" && -f "$dxvk_from/dxgi.dll" ]] || die "No d3d11.dll and dxgi.dll in $dxvk_from."
+is_patched_dll "$dxvk_from/d3d11.dll" || die "$dxvk_from/d3d11.dll is not a gaze-VRS build."
+
+new_version="$(dll_dxvk_version "$dxvk_from/d3d11.dll")"
+if [[ -z "$commit" ]]; then
+  echo "Cannot tell which DXVK commit this Proton build ships; version match not checked."
+elif ! same_commit "$commit" "$(version_commit "$new_version")"; then
+  message="The DLLs are DXVK $new_version, but this Proton build ships DXVK commit ${commit:0:12}."
+  (( force )) || die "$message
+Build matching DLLs with: scripts/dev-container.sh build --proton '$origin'
+or pass --force to install these."
+  echo "$message Installing them because of --force."
+fi
+
+install_dlls() {
+  local target name
+  target="$(proton_dxvk_dir "$1")"
+  for name in d3d11.dll dxgi.dll; do replace_file "$dxvk_from/$name" "$target/$name"; done
 }
 
-target="$proton_dir/files/lib/wine/dxvk/x86_64-windows"
-
-[[ -d "$target" ]] || {
-  echo "Could not find the Proton DXVK directory: $target" >&2
-  exit 1
+if [[ "$dest" != "$source_dir" ]]; then
+  if [[ -e "$dest" ]] && ! cmp -s "$source_dir/version" "$dest/version"; then
+    (( refresh )) || die "$source_dir changed after $dest was made.
+Close the game and run again with --refresh to copy it again."
+    rm -rf "$dest"
+  fi
+  if [[ ! -e "$dest" ]]; then
+    mkdir -p "$tools_dir"
+    staging="$(mktemp -d "$dest.XXXXXX")"
+    cp -a --reflink=auto "$source_dir/." "$staging/"
+    printf '%s\n' "$source_dir" > "$staging/.dfr-clone"
+    cat > "$staging/compatibilitytool.vdf" <<VDF
+"compatibilitytools"
+{
+  "compat_tools"
+  {
+    "$name"
+    {
+      "install_path" "."
+      "display_name" "$name"
+      "from_oslist"  "windows"
+      "to_oslist"    "linux"
+    }
+  }
 }
-
-[[ -f "$target/d3d11.dll" && -f "$target/dxgi.dll" ]] || {
-  echo "Missing d3d11.dll and/or dxgi.dll in $target." >&2
-  exit 1
-}
-
-mkdir -p "$backup_dir"
-cp -a "$target/d3d11.dll" "$backup_dir/d3d11.dll"
-cp -a "$target/dxgi.dll" "$backup_dir/dxgi.dll"
-replace_dll "$dxvk_from/d3d11.dll" "$target/d3d11.dll"
-replace_dll "$dxvk_from/dxgi.dll" "$target/dxgi.dll"
-printf '%s\n' "Installed patched DXVK into $target" "Backup: $backup_dir"
-printf '%s\n' "Note: updating/reinstalling Proton may replace these files."
+VDF
+    install_dlls "$staging"
+    mv -T "$staging" "$dest"
+    echo "Made $dest from $source_dir with DXVK $new_version."
+    echo "Restart Steam, then select '$name' as the compatibility tool for the game."
+    exit 0
+  fi
+elif [[ ! -f "$dest/.dfr-clone" ]]; then
+  # In place: keep Proton's own DLLs, once. A patched DLL is never kept as stock.
+  target="$(proton_dxvk_dir "$dest")"
+  if ! is_patched_dll "$target/d3d11.dll"; then
+    for name in d3d11.dll dxgi.dll; do cp -pf "$target/$name" "$target/$name.stock"; done
+    echo "Kept Proton's DLLs as $target/{d3d11,dxgi}.dll.stock"
+  elif [[ ! -f "$target/d3d11.dll.stock" ]]; then
+    echo "$dest is already patched and has no .stock copy; uninstall cannot bring its own DLLs back."
+  fi
+fi
+install_dlls "$dest"
+echo "Installed DXVK $new_version into $dest."

@@ -32,3 +32,4 @@ common=(-std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers)
 python3 "$repo_dir/tests/test_gaze_bridge.py" "$build_dir/gaze-bridge-fake"
 "${CXX:-c++}" "${common[@]}" "$repo_dir/tools/dfrctl.cpp" -pthread -o "$build_dir/dfrctl"
 bash "$repo_dir/tests/test_dfrctl.sh" "$build_dir/dfrctl"
+bash "$repo_dir/tests/test_install.sh"

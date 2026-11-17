@@ -1,36 +1,41 @@
 #!/usr/bin/env bash
+# Undoes install-dxvk.sh for one Proton build.
+#
+#   uninstall-dxvk.sh PROTON     PROTON is a directory or the name of a Proton build
+#   uninstall-dxvk.sh            list the Proton builds found
+#
+# A <name>-dfr copy is deleted. A build patched with --in-place gets its own
+# DLLs back from the .stock copies.
 set -euo pipefail
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_dir/scripts/lib.sh"
 
-# Replace a (possibly read-only) DLL without touching its permissions: write a
-# temp file beside it, copy the original's mode, and rename it into place.
-replace_dll() {
-  local src="$1" dst="$2" tmp
-  tmp="$(mktemp "$dst.XXXXXX")"
-  if ! { cp "$src" "$tmp" && chmod --reference="$dst" "$tmp" && mv -f "$tmp" "$dst"; }; then
-    rm -f "$tmp"
-    return 1
-  fi
-}
+if [[ $# -ne 1 || "$1" == -* ]]; then
+  echo "Proton builds found:"
+  list_proton_installs
+  sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  exit 2
+fi
+dir="$(resolve_proton "$1")" || { echo "No Proton build '$1'." >&2; exit 1; }
 
-backup_dir="${1:-}"
-[[ -d "$backup_dir" ]] || { echo "Usage: $0 /path/to/backup" >&2; exit 2; }
+if [[ -f "$dir/.dfr-clone" ]]; then
+  rm -rf "$dir"
+  echo "Removed $dir. Select another compatibility tool for the game in Steam."
+  exit 0
+fi
 
-proton_dir="${PROTON_DIR:-}"
-[[ -n "$proton_dir" && -d "$proton_dir" ]] || { echo "Set PROTON_DIR=/path/to/Proton" >&2; exit 2; }
-
-[[ -f "$backup_dir/d3d11.dll" && -f "$backup_dir/dxgi.dll" ]] || {
-  echo "Backup is missing d3d11.dll and/or dxgi.dll." >&2
+target="$(proton_dxvk_dir "$dir")"
+[[ -f "$target/d3d11.dll" ]] || { echo "No DXVK in $dir." >&2; exit 1; }
+if ! is_patched_dll "$target/d3d11.dll"; then
+  # A Proton update put its own, newer DLLs back: the kept ones are older.
+  rm -f "$target/d3d11.dll.stock" "$target/dxgi.dll.stock"
+  echo "$dir already has Proton's own DXVK."
+  exit 0
+fi
+[[ -f "$target/d3d11.dll.stock" && -f "$target/dxgi.dll.stock" ]] || {
+  echo "$dir is patched but has no .stock copies. Reinstall this Proton build, or verify its files in Steam." >&2
   exit 1
 }
-
-target="$proton_dir/files/lib/wine/dxvk/x86_64-windows"
-
-[[ -d "$target" ]] || {
-  echo "Could not find target DXVK directory: $target" >&2
-  exit 1
-}
-
-replace_dll "$backup_dir/d3d11.dll" "$target/d3d11.dll"
-replace_dll "$backup_dir/dxgi.dll" "$target/dxgi.dll"
-
-echo "Restored original DXVK DLLs in $target"
+mv -f "$target/d3d11.dll.stock" "$target/d3d11.dll"
+mv -f "$target/dxgi.dll.stock" "$target/dxgi.dll"
+echo "Proton's own DXVK is back in $dir."

@@ -37,7 +37,7 @@ steam_roots() {
   local root
   for root in "${STEAM_DIR:-}" "$HOME/.local/share/Steam" "$HOME/.steam/steam" \
       "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"; do
-    [[ -n "$root" && -d "$root" ]] && readlink -f "$root"
+    if [[ -n "$root" && -d "$root" ]]; then readlink -f "$root"; fi
   done | awk '!seen[$0]++'
 }
 
