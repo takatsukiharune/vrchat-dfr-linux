@@ -24,7 +24,8 @@ namespace dxvk
     float fullArea = -1.0f, midArea = -1.0f;
     uint32_t coarse = 5u; // raw rate code, (log2(w) << 2) | log2(h)
     bool autoCoarse = false;
-    uint32_t mid = 5u; // rate of the mid_area ring; used no coarser than `coarse`
+    static constexpr uint32_t RateAuto = 0xffu;
+    uint32_t mid = RateAuto; // rate code of the mid_area ring, or RateAuto; see gazeMidRate
     uint32_t minSize = 700u;
     uint32_t onlySamples = 0u, onlyFormat = 0u;
     uint32_t forceW = 0u, forceH = 0u;
@@ -127,7 +128,11 @@ namespace dxvk
         if (lower(value) == "auto") { autoCoarse = true; }
         else { if (!rate(coarse)) return false; autoCoarse = false; }
       }
-      else if (key == "mid") { if (!rate(mid)) return false; }
+      else if (key == "mid")
+      {
+        if (lower(value) == "auto") mid = RateAuto;
+        else if (!rate(mid)) return false;
+      }
       else if (key == "minsize") { if (!number(1.0, 65536.0)) return false; minSize = uint32_t(n); }
       else if (key == "samples") { if (!number(0.0, 64.0)) return false; onlySamples = uint32_t(n); }
       else if (key == "fmt") { if (!number(0.0, 4294967295.0)) return false; onlyFormat = uint32_t(n); }
@@ -213,6 +218,15 @@ namespace dxvk
       return text;
     }
   };
+
+  // Rate of the ring between full_area and mid_area for an outer rate. `auto`
+  // gives what the ring had before `mid` existed: 2x2, or the outer rate where
+  // that is finer. The ring is never coarser than the outer rate in either axis.
+  inline uint32_t gazeMidRate(uint32_t mid, uint32_t coarse)
+  {
+    const uint32_t want = mid == GazeConfig::RateAuto ? std::min(5u, coarse) : mid;
+    return (std::min(want >> 2u, coarse >> 2u) << 2u) | std::min(want & 3u, coarse & 3u);
+  }
 
   // Every key that can also be given as a DXVK_GAZE_<KEY> environment variable.
   inline const std::vector<std::string> &gazeConfigEnvKeys()

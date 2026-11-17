@@ -33,7 +33,7 @@ done
   echo "The dxvk submodule is missing. Run: git submodule update --init dxvk" >&2
   exit 1
 }
-pinned="$(git -C "$repo_dir/dxvk" rev-parse HEAD)"
+pinned="$(pinned_dxvk_commit "$repo_dir")"
 if [[ -n "$proton" ]]; then
   ref="$(proton_dxvk_commit "$proton")" || {
     echo "Cannot tell which DXVK commit $proton ships. Pass --ref COMMIT." >&2
@@ -51,20 +51,8 @@ if [[ -n "$variant" ]]; then
   }
   ref="${ref:-$(cat "$work/.git/variant-patches/commit")}"
 fi
-have() { git rev-parse -q --verify "$1^{commit}" >/dev/null 2>&1; }
 git fetch -q --tags origin HEAD
-want="${ref:-$pinned}"
-# A branch name always needs a fetch, a commit only when it is not here yet.
-if ! [[ "$want" =~ ^[0-9a-f]{7,40}$ ]] || ! have "$want"; then
-  git fetch -q --tags "$dxvk_upstream_url" '+refs/heads/*:refs/remotes/upstream/*'
-  if ! have "$want" && [[ "$want" =~ ^[0-9a-f]{40}$ ]]; then
-    git fetch -q "$dxvk_upstream_url" "$want" || true
-  fi
-fi
-base="$(git rev-parse -q --verify "upstream/$want^{commit}" || git rev-parse -q --verify "$want^{commit}")" || {
-  echo "DXVK has no commit, tag or branch '$want'." >&2
-  exit 1
-}
+base="$(resolve_dxvk_ref "${ref:-$pinned}")" || exit 1
 base_version="$(git describe "$base")"
 
 # With a fixed identity and date, the same base and patches give the same commits.
@@ -76,16 +64,7 @@ git clean -q -fd -e '/build-*'
 # Before any commit is made here, or `git add` would record stale submodules.
 git submodule update -q --init --recursive
 if [[ -n "$variant" ]]; then
-  for patch in "$work"/.git/variant-patches/*.patch; do
-    [[ -e "$patch" ]] || continue
-    patch -s -Np1 --no-backup-if-mismatch -i "$patch" || {
-      echo "A DXVK patch of $variant does not apply to DXVK $base_version." >&2
-      exit 1
-    }
-  done
-  git add -A
-  git -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL" \
-    commit -q --allow-empty --date="$GIT_COMMITTER_DATE" -m "DXVK patches of $variant"
+  apply_variant_patches "$work/.git/variant-patches" "$variant" || exit 1
   base_version+="-$variant"
 fi
 if ! git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch; then

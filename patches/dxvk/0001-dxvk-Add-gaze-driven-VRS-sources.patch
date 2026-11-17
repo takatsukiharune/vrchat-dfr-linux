@@ -8,15 +8,15 @@ Gaze shared-memory reader, settings, tile-map worker and the Vulkan
 shading-rate attachment. Nothing references these files yet.
 ---
  src/dxvk/dxvk_gaze_buffer.h   |  42 ++
- src/dxvk/dxvk_gaze_config.h   | 344 ++++++++++++++++
+ src/dxvk/dxvk_gaze_config.h   | 358 +++++++++++++++++
  src/dxvk/dxvk_gaze_dot.h      |  31 ++
- src/dxvk/dxvk_gaze_map.h      | 195 +++++++++
+ src/dxvk/dxvk_gaze_map.h      | 192 +++++++++
  src/dxvk/dxvk_gaze_shm.h      |  76 ++++
  src/dxvk/dxvk_gaze_source.cpp | 281 +++++++++++++
  src/dxvk/dxvk_gaze_source.h   |  56 +++
- src/dxvk/dxvk_gaze_vrs.cpp    | 716 ++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_gaze_vrs.cpp    | 715 ++++++++++++++++++++++++++++++++++
  src/dxvk/dxvk_gaze_vrs.h      | 102 +++++
- 9 files changed, 1843 insertions(+)
+ 9 files changed, 1853 insertions(+)
  create mode 100644 src/dxvk/dxvk_gaze_buffer.h
  create mode 100644 src/dxvk/dxvk_gaze_config.h
  create mode 100644 src/dxvk/dxvk_gaze_dot.h
@@ -77,10 +77,10 @@ index 0000000000000000000000000000000000000000..f5407168362718cbbd89e3d181121cba
 +}
 diff --git a/src/dxvk/dxvk_gaze_config.h b/src/dxvk/dxvk_gaze_config.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..91ff7d420408b52554d78a481da444475c412362
+index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb862f12b59f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_config.h
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,358 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -107,7 +107,8 @@ index 0000000000000000000000000000000000000000..91ff7d420408b52554d78a481da44447
 +    float fullArea = -1.0f, midArea = -1.0f;
 +    uint32_t coarse = 5u; // raw rate code, (log2(w) << 2) | log2(h)
 +    bool autoCoarse = false;
-+    uint32_t mid = 5u; // rate of the mid_area ring; used no coarser than `coarse`
++    static constexpr uint32_t RateAuto = 0xffu;
++    uint32_t mid = RateAuto; // rate code of the mid_area ring, or RateAuto; see gazeMidRate
 +    uint32_t minSize = 700u;
 +    uint32_t onlySamples = 0u, onlyFormat = 0u;
 +    uint32_t forceW = 0u, forceH = 0u;
@@ -210,7 +211,11 @@ index 0000000000000000000000000000000000000000..91ff7d420408b52554d78a481da44447
 +        if (lower(value) == "auto") { autoCoarse = true; }
 +        else { if (!rate(coarse)) return false; autoCoarse = false; }
 +      }
-+      else if (key == "mid") { if (!rate(mid)) return false; }
++      else if (key == "mid")
++      {
++        if (lower(value) == "auto") mid = RateAuto;
++        else if (!rate(mid)) return false;
++      }
 +      else if (key == "minsize") { if (!number(1.0, 65536.0)) return false; minSize = uint32_t(n); }
 +      else if (key == "samples") { if (!number(0.0, 64.0)) return false; onlySamples = uint32_t(n); }
 +      else if (key == "fmt") { if (!number(0.0, 4294967295.0)) return false; onlyFormat = uint32_t(n); }
@@ -296,6 +301,15 @@ index 0000000000000000000000000000000000000000..91ff7d420408b52554d78a481da44447
 +      return text;
 +    }
 +  };
++
++  // Rate of the ring between full_area and mid_area for an outer rate. `auto`
++  // gives what the ring had before `mid` existed: 2x2, or the outer rate where
++  // that is finer. The ring is never coarser than the outer rate in either axis.
++  inline uint32_t gazeMidRate(uint32_t mid, uint32_t coarse)
++  {
++    const uint32_t want = mid == GazeConfig::RateAuto ? std::min(5u, coarse) : mid;
++    return (std::min(want >> 2u, coarse >> 2u) << 2u) | std::min(want & 3u, coarse & 3u);
++  }
 +
 +  // Every key that can also be given as a DXVK_GAZE_<KEY> environment variable.
 +  inline const std::vector<std::string> &gazeConfigEnvKeys()
@@ -465,10 +479,10 @@ index 0000000000000000000000000000000000000000..71ccea173ad3aeef185dd74e3a582e53
 \ No newline at end of file
 diff --git a/src/dxvk/dxvk_gaze_map.h b/src/dxvk/dxvk_gaze_map.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e393c38c2064c463c6fc5488bfcd775e14d8d264
+index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea080bd599
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_map.h
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,192 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -536,9 +550,6 @@ index 0000000000000000000000000000000000000000..e393c38c2064c463c6fc5488bfcd775e
 +    };
 +    const float r1 = radius(request.fullArea, request.r1);
 +    const float r2 = radius(request.midArea, request.r2);
-+    // The mid ring is never coarser than the outer area in either direction.
-+    const uint32_t mid = (std::min(request.mid >> 2u, request.coarse >> 2u) << 2u)
-+        | std::min(request.mid & 3u, request.coarse & 3u);
 +    for (uint32_t l = 0u; l < layers; l++)
 +    {
 +      for (uint32_t ty = 0u; ty < tilesY; ty++)
@@ -552,7 +563,7 @@ index 0000000000000000000000000000000000000000..e393c38c2064c463c6fc5488bfcd775e
 +          const float d = std::hypot(lx - request.fx[eye] * eyeW,
 +              py - request.fy[eye] * float(height)) / minDim;
 +          result.data[size_t(l) * layerStride + size_t(ty) * tilesX + tx]
-+              = d >= r1 ? uint8_t(d >= r2 ? request.coarse : mid) : 0u;
++              = d >= r1 ? uint8_t(d >= r2 ? request.coarse : request.mid) : 0u;
 +        }
 +      }
 +      std::fill(result.data.begin() + size_t(l) * layerStride + tilesX * tilesY,
@@ -1097,10 +1108,10 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8f0bce3c71d6a069cc33c28c5f145d3bf4b40d7b
+index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96504cd27c
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
-@@ -0,0 +1,716 @@
+@@ -0,0 +1,715 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <cstdio>
@@ -1598,8 +1609,7 @@ index 0000000000000000000000000000000000000000..8f0bce3c71d6a069cc33c28c5f145d3b
 +
 +    m_mapWorker->candidates.fetch_add(1u, std::memory_order_relaxed);
 +    const uint32_t coarse = resolveCoarse(samples);
-+    const uint32_t mid = resolveRate((std::min(m_cfg.mid >> 2u, coarse >> 2u) << 2u)
-+        | std::min(m_cfg.mid & 3u, coarse & 3u), samples);
++    const uint32_t mid = resolveRate(gazeMidRate(m_cfg.mid, coarse), samples);
 +
 +    const uint32_t tilesX = (extent.width + m_texel.width - 1u) / m_texel.width;
 +    const uint32_t tilesY = (extent.height + m_texel.height - 1u) / m_texel.height;

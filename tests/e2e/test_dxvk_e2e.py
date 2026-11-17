@@ -242,7 +242,12 @@ def run_bench(args, root):
     env = dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FAKE="fixed", DXVK_GAZE_COARSE="auto")
     cases = [("VRS off", {})]
     for spec in args.bench:
-        full, mid_area, mid = (spec.split(",") + ["2x2"])[:3]
+        full, mid_area, mid = (spec.split(",") + ["auto"])[:3]
+        # DXVK ignores a value it cannot parse, so the label would lie.
+        if not (full.isdigit() and mid_area.isdigit() and int(full) <= 100 and int(mid_area) <= 100):
+            sys.exit(f"--bench {spec}: FULL and MID_AREA must be percentages")
+        if mid not in ("auto", "1x1", "2x1", "1x2", "2x2"):
+            sys.exit(f"--bench {spec}: mid must be auto, 1x1, 2x1, 1x2 or 2x2, not {mid}")
         cases.append((f"full_area={full} mid_area={mid_area} mid={mid}",
                       dict(env, DXVK_GAZE_FULL_AREA=full, DXVK_GAZE_MID_AREA=mid_area, DXVK_GAZE_MID=mid)))
     print(f"{width}x{height} side by side, {args.samples} sample(s), {args.bench_seconds:g} s per case")

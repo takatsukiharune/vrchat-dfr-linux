@@ -40,6 +40,10 @@ run() {
     options+=("$1"); shift
   done
   [[ "$stage" == bridge || -e "$repo_dir/dxvk/.git" ]] || git -C "$repo_dir" submodule update --init dxvk
+  # In a git worktree, .git points into the main repository: mount that too.
+  local common
+  common="$(git -C "$repo_dir" rev-parse --path-format=absolute --git-common-dir)"
+  [[ "$common" == "$repo_dir/.git" ]] || options+=("--volume=$common:$common:ro")
   mkdir -p "$repo_dir/dist"
   "$engine" run --rm --init --security-opt label=disable --userns=keep-id \
     -v "$repo_dir":/src:ro -v "$repo_dir/dist":/src/dist -v "$volume":/work:U -w /src \
@@ -52,24 +56,32 @@ gpu=()
 [[ -d /dev/dri ]] && gpu=(--device=/dev/dri --group-add=keep-groups)
 bridge="bash scripts/build-openxr-bridge.sh"
 build="bash scripts/build-dxvk.sh"
+# The arguments, each quoted for the container's shell.
+quoted() { [[ $# -eq 0 ]] || printf ' %q' "$@"; }
 
 case "${1:-}" in
   bridge) run bridge "$bridge" ;;
   build)
     shift
+    args=() mount=()
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == --proton ]]; then
+        proton="$(resolve_proton "${2:?--proton needs a Proton directory or name}")" \
+          || { echo "No Proton build '$2'. Found:" >&2; list_proton_installs >&2; exit 1; }
+        mount=("--volume=$proton:/proton:ro")
+        args+=(--proton /proton)
+        shift 2
+      else
+        args+=("$1")
+        shift
+      fi
+    done
     run bridge "$bridge"
-    if [[ "${1:-}" == "--proton" ]]; then
-      proton="$(resolve_proton "${2:?--proton needs a Proton directory or name}")" \
-        || { echo "No Proton build '$2'. Found:" >&2; list_proton_installs >&2; exit 1; }
-      run build "--volume=$proton:/proton:ro" -- "$build --proton /proton"
-    else
-      [[ $# -eq 0 ]] || build+=" $(printf '%q ' "$@")"
-      run build "$build"
-    fi
+    run build "${mount[@]}" -- "$build$(quoted "${args[@]}")"
     ;;
-  check) shift; run build "bash scripts/dxvk-patches.sh check $*" ;;
+  check) shift; run build "bash scripts/dxvk-patches.sh check$(quoted "$@")" ;;
   test)  run build "bash scripts/test-gaze-bridge.sh" ;;
-  e2e)   shift; run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh $*" ;;
+  e2e)   shift; run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh$(quoted "$@")" ;;
   all)   run bridge "$bridge"
          run build "$build && bash scripts/test-gaze-bridge.sh"
          run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh" ;;

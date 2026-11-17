@@ -13,7 +13,7 @@ repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_dir/scripts/lib.sh"
 sub="$repo_dir/dxvk"
 [[ -e "$sub/.git" ]] || { echo "Run: git submodule update --init dxvk" >&2; exit 1; }
-pinned="$(git -C "$repo_dir" ls-files -s dxvk | awk '{print $2}')"
+pinned="$(pinned_dxvk_commit "$repo_dir")"
 export GIT_COMMITTER_NAME="${GIT_COMMITTER_NAME:-vrchat-dfr-linux}"
 export GIT_COMMITTER_EMAIL="${GIT_COMMITTER_EMAIL:-vrchat-dfr-linux@users.noreply.github.com}"
 
@@ -49,21 +49,13 @@ case "${1:-}" in
           fetch_variant_patches "$target" "$scratch/variant" || { echo "FETCH     $target"; failed=1; continue; }
           ref="$(cat "$scratch/variant/commit")" variant="$target" ;;
       esac
-      if ! git rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1; then
-        git fetch -q "$dxvk_upstream_url" "+$ref:refs/check/target"
-        ref=refs/check/target
-      fi
-      git checkout -q -f --detach "$ref"
+      base="$(resolve_dxvk_ref "$ref")" || { echo "FETCH     $target"; failed=1; continue; }
+      git checkout -q -f --detach "$base"
       git clean -q -fd
       label="$(git rev-parse --short HEAD)"
       if [[ -n "$variant" ]]; then
         label+=" + $target"
-        for patch in "$scratch"/variant/*.patch; do
-          patch -s -Np1 --no-backup-if-mismatch -i "$patch" >/dev/null || { echo "VARIANT   $label: its own patch $(basename "$patch") fails"; failed=1; continue 2; }
-        done
-        git add -A
-        git -c user.name="$GIT_COMMITTER_NAME" -c user.email="$GIT_COMMITTER_EMAIL" \
-          commit -q --allow-empty -m "DXVK patches of $target"
+        apply_variant_patches "$scratch/variant" "$target" || { echo "VARIANT   $label"; failed=1; continue; }
       fi
       if git am -q -k -3 "$repo_dir"/patches/dxvk/*.patch >/dev/null 2>&1; then
         echo "ok        $label"
