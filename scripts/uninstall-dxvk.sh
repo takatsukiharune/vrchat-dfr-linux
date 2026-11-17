@@ -4,8 +4,8 @@
 #   uninstall-dxvk.sh PROTON     PROTON is a directory or the name of a Proton build
 #   uninstall-dxvk.sh            list the Proton builds found
 #
-# A <name>-dfr copy is deleted. A build patched with --in-place gets its own
-# DLLs back from the .stock copies.
+# A <name>-dfr copy is deleted, whether PROTON names the copy or its source. A
+# build patched with --in-place gets its own DLLs back from the .stock copies.
 set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_dir/scripts/lib.sh"
@@ -23,13 +23,19 @@ if [[ -f "$dir/.dfr-clone" ]]; then
   echo "Removed $dir. Select another compatibility tool for the game in Steam."
   exit 0
 fi
+removed=0
+while IFS= read -r copy; do
+  rm -rf "$copy"
+  echo "Removed $copy. Select another compatibility tool for the game in Steam."
+  removed=1
+done < <(copies_of "$dir")
 
 target="$(proton_dxvk_dir "$dir")"
 [[ -f "$target/d3d11.dll" ]] || { echo "No DXVK in $dir." >&2; exit 1; }
 if ! is_patched_dll "$target/d3d11.dll"; then
   # A Proton update put its own, newer DLLs back: the kept ones are older.
   rm -f "$target/d3d11.dll.stock" "$target/dxgi.dll.stock"
-  echo "$dir already has Proton's own DXVK."
+  (( removed )) || echo "$dir already has Proton's own DXVK."
   exit 0
 fi
 [[ -f "$target/d3d11.dll.stock" && -f "$target/dxgi.dll.stock" ]] || {

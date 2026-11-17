@@ -108,6 +108,48 @@ resolve_proton() {
   return 1
 }
 
+# compatibilitytools.d of the Steam installation that holds a Proton build.
+tools_dir_of() {
+  case "$1" in
+    */compatibilitytools.d/*) printf '%s\n' "${1%/compatibilitytools.d/*}/compatibilitytools.d" ;;
+    */steamapps/common/*) printf '%s\n' "${1%/steamapps/common/*}/compatibilitytools.d" ;;
+    *) return 1 ;;
+  esac
+}
+
+# The name Steam stores per game for a compatibility tool: the first key under
+# "compat_tools" in its manifest, escaped as written there. Valve's Proton has
+# no manifest; its directory name stands in, escaped for a manifest.
+tool_internal_name() {
+  if [[ -f "$1/compatibilitytool.vdf" ]]; then
+    sed 's|^[[:space:]]*//.*||' "$1/compatibilitytool.vdf" | grep -o '"\([^"\\]\|\\.\)*"' \
+      | awk 'previous == "\"compat_tools\"" { print substr($0, 2, length($0) - 2); exit } { previous = $0 }'
+  else
+    basename "$1" | sed 's/[\\"]/\\&/g'
+  fi
+}
+
+# Tools in a compatibilitytools.d that declare an internal name.
+tools_named() {  # NAME DIR
+  local tool
+  for tool in "$2"/*/; do
+    [[ "$(tool_internal_name "${tool%/}")" == "$1" ]] && printf '%s\n' "${tool%/}"
+  done
+  return 0
+}
+
+# Copies of a Proton build that install-dxvk.sh made.
+copies_of() {
+  local dir
+  while IFS= read -r dir; do
+    [[ -f "$dir/.dfr-clone" && "$(cat "$dir/.dfr-clone")" == "$1" ]] && printf '%s\n' "$dir"
+  done < <(proton_installs)
+  return 0
+}
+
+# Same version file, or neither has one.
+same_version() { [[ ! -e "$1/version" && ! -e "$2/version" ]] || cmp -s "$1/version" "$2/version"; }
+
 list_proton_installs() {
   local dir dll state
   while IFS= read -r dir; do
