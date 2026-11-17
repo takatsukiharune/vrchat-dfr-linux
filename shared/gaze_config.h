@@ -24,6 +24,7 @@ namespace dxvk
     float fullArea = -1.0f, midArea = -1.0f;
     uint32_t coarse = 5u; // raw rate code, (log2(w) << 2) | log2(h)
     bool autoCoarse = false;
+    uint32_t mid = 5u; // rate of the mid_area ring; used no coarser than `coarse`
     uint32_t minSize = 700u;
     uint32_t onlySamples = 0u, onlyFormat = 0u;
     uint32_t forceW = 0u, forceH = 0u;
@@ -101,6 +102,21 @@ namespace dxvk
         return true;
       };
 
+      // "2x1" or a raw rate code.
+      auto rate = [&](uint32_t &out) {
+        unsigned w = 0u, h = 0u;
+        char tail = 0;
+        if (std::sscanf(lower(value).c_str(), "%ux%u%c", &w, &h, &tail) == 2)
+        {
+          if ((w != 1u && w != 2u && w != 4u) || (h != 1u && h != 2u && h != 4u)) return false;
+          out = ((w >> 1u) << 2u) | (h >> 1u);
+          return true;
+        }
+        if (!number(0.0, 15.0) || n != std::floor(n) || !validRateCode(uint32_t(n))) return false;
+        out = uint32_t(n);
+        return true;
+      };
+
       if (key == "enabled" || key == "vrs") { if (!parseBool(value, b)) return false; enabled = b; }
       else if (key == "r1") { if (!number(0.0, 10.0)) return false; r1 = float(n); }
       else if (key == "r2") { if (!number(0.0, 10.0)) return false; r2 = float(n); }
@@ -108,23 +124,10 @@ namespace dxvk
       else if (key == "mid_area") { if (!number(-1.0, 100.0)) return false; midArea = n < 0.0 ? -1.0f : float(n); }
       else if (key == "coarse" || key == "maxrate")
       {
-        const std::string v = lower(value);
-        unsigned w = 0u, h = 0u;
-        char tail = 0;
-        if (v == "auto") { autoCoarse = true; }
-        else if (std::sscanf(v.c_str(), "%ux%u%c", &w, &h, &tail) == 2)
-        {
-          if ((w != 1u && w != 2u && w != 4u) || (h != 1u && h != 2u && h != 4u)) return false;
-          coarse = ((w >> 1u) << 2u) | (h >> 1u);
-          autoCoarse = false;
-        }
-        else
-        {
-          if (!number(0.0, 15.0) || n != std::floor(n) || !validRateCode(uint32_t(n))) return false;
-          coarse = uint32_t(n);
-          autoCoarse = false;
-        }
+        if (lower(value) == "auto") { autoCoarse = true; }
+        else { if (!rate(coarse)) return false; autoCoarse = false; }
       }
+      else if (key == "mid") { if (!rate(mid)) return false; }
       else if (key == "minsize") { if (!number(1.0, 65536.0)) return false; minSize = uint32_t(n); }
       else if (key == "samples") { if (!number(0.0, 64.0)) return false; onlySamples = uint32_t(n); }
       else if (key == "fmt") { if (!number(0.0, 4294967295.0)) return false; onlyFormat = uint32_t(n); }
@@ -184,7 +187,7 @@ namespace dxvk
     {
       return enabled == o.enabled && r1 == o.r1 && r2 == o.r2
           && fullArea == o.fullArea && midArea == o.midArea
-          && coarse == o.coarse && autoCoarse == o.autoCoarse && minSize == o.minSize
+          && coarse == o.coarse && autoCoarse == o.autoCoarse && mid == o.mid && minSize == o.minSize
           && onlySamples == o.onlySamples && onlyFormat == o.onlyFormat
           && forceW == o.forceW && forceH == o.forceH && debug == o.debug && dot == o.dot
           && dotRadius == o.dotRadius && flipY == o.flipY && swapEyes == o.swapEyes
@@ -200,11 +203,11 @@ namespace dxvk
       static const char *const fakes[] = {"none", "x", "y", "circle", "fixed", "grid"};
       char text[512];
       std::snprintf(text, sizeof(text),
-          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u fmt=%u samples=%u"
+          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u mid=%u fmt=%u samples=%u"
           " minsize=%u size=%ux%u flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
           " fallback=%s dot=%d debug=%d",
           int(enabled), double(fullArea), double(midArea), double(r1), double(r2),
-          autoCoarse ? "auto/" : "", coarse, onlyFormat, onlySamples, minSize, forceW, forceH,
+          autoCoarse ? "auto/" : "", coarse, mid, onlyFormat, onlySamples, minSize, forceW, forceH,
           int(flipY), int(swapEyes), double(gainY), fakes[uint32_t(fake)], holdMs,
           fallback == GazeFallback::Center ? "center" : "off", int(dot), int(debug));
       return text;
@@ -215,7 +218,7 @@ namespace dxvk
   inline const std::vector<std::string> &gazeConfigEnvKeys()
   {
     static const std::vector<std::string> keys = {
-        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MINSIZE", "SAMPLES", "FMT",
+        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MID", "MINSIZE", "SAMPLES", "FMT",
         "SIZE", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
         "FLIPX_L", "FLIPX_R", "FLIPY_L", "FLIPY_R", "FAKE", "HOLD_MS", "FALLBACK"};
     return keys;

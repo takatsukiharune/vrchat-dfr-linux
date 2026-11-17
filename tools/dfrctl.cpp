@@ -40,9 +40,10 @@ const char* const usage =
 const char* const keys =
   "enabled      0|1          foveation on/off\n"
   "full_area    0..100       % of one eye's image shaded at full rate\n"
-  "mid_area     0..100       % shaded at full rate or 2x2; the rest uses 'coarse'\n"
+  "mid_area     0..100       % shaded at full rate or at 'mid'; the rest uses 'coarse'\n"
   "r1, r2       0..10        zone radii, used only when the areas are unset (-1)\n"
   "coarse       auto|1x1|2x1|1x2|2x2|2x4|4x2|4x4   outer rate, clamped to what the GPU supports\n"
+  "mid          1x1|2x1|1x2|2x2   rate of the mid_area ring (default 2x2), never coarser than 'coarse'\n"
   "hold_ms      0..10000     keep the last gaze this long when tracking drops (blinks)\n"
   "fallback     off|center   after hold_ms: full rate, or foveate around the eye centre\n"
   "fmt          Vulkan format number of the scene pass (VRChat: 97), 0 = any\n"

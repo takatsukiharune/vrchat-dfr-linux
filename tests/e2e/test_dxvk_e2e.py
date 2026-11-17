@@ -88,7 +88,8 @@ class Scenario:
             eyes.append((n / (half * tiles_y),
                          sum(x + 0.5 for x, _ in cells) / n / half if n else -1.0,
                          sum(y + 0.5 for _, y in cells) / n / tiles_y if n else -1.0))
-        return {"frame": frame, "eyes": eyes, "classes": set("".join(rows))}
+        text = "".join(rows)
+        return {"frame": frame, "eyes": eyes, "classes": set(text), "half": text.count("h") / len(text)}
 
     def wait(self, what, predicate, timeout=10.0):
         deadline, state = time.monotonic() + timeout, None
@@ -168,6 +169,13 @@ def run_main(args, work, samples, validate):
         # 4x4 is not supported on every GPU; it must be clamped, never passed through.
         s.write_config(**{**base, "coarse": "4x4"})
         s.wait("live change: coarse=4x4 (clamped to what the GPU supports)", foveated(0.05, L, R))
+
+        # The ring between full_area and mid_area takes the intermediate rate.
+        s.write_config(**{**base, "mid": "2x1"})
+        s.wait("live change: mid=2x1 shades the mid ring at a half step",
+               lambda state: foveated(0.05, L, R)(state) and near(state["half"], 0.10, 0.03))
+        s.write_config(**base)
+        s.wait("live change: mid back to 2x2", lambda state: "h" not in state["classes"])
 
         s.config.write_text("full_area = banana\nmid_area = 50\n")
         s.hold("a config file with an invalid value is rejected as a whole", foveated(0.05, L, R), 1.5)

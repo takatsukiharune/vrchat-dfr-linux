@@ -8,15 +8,15 @@ Gaze shared-memory reader, settings, tile-map worker and the Vulkan
 shading-rate attachment. Nothing references these files yet.
 ---
  src/dxvk/dxvk_gaze_buffer.h   |  42 ++
- src/dxvk/dxvk_gaze_config.h   | 341 ++++++++++++++++
+ src/dxvk/dxvk_gaze_config.h   | 344 ++++++++++++++++
  src/dxvk/dxvk_gaze_dot.h      |  31 ++
- src/dxvk/dxvk_gaze_map.h      | 192 +++++++++
+ src/dxvk/dxvk_gaze_map.h      | 195 +++++++++
  src/dxvk/dxvk_gaze_shm.h      |  76 ++++
- src/dxvk/dxvk_gaze_source.cpp | 281 ++++++++++++++
+ src/dxvk/dxvk_gaze_source.cpp | 281 +++++++++++++
  src/dxvk/dxvk_gaze_source.h   |  56 +++
- src/dxvk/dxvk_gaze_vrs.cpp    | 712 ++++++++++++++++++++++++++++++++++
- src/dxvk/dxvk_gaze_vrs.h      | 101 +++++
- 9 files changed, 1832 insertions(+)
+ src/dxvk/dxvk_gaze_vrs.cpp    | 716 ++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_gaze_vrs.h      | 102 +++++
+ 9 files changed, 1843 insertions(+)
  create mode 100644 src/dxvk/dxvk_gaze_buffer.h
  create mode 100644 src/dxvk/dxvk_gaze_config.h
  create mode 100644 src/dxvk/dxvk_gaze_dot.h
@@ -77,10 +77,10 @@ index 0000000000000000000000000000000000000000..f5407168362718cbbd89e3d181121cba
 +}
 diff --git a/src/dxvk/dxvk_gaze_config.h b/src/dxvk/dxvk_gaze_config.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f149459cadb
+index 0000000000000000000000000000000000000000..91ff7d420408b52554d78a481da444475c412362
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_config.h
-@@ -0,0 +1,341 @@
+@@ -0,0 +1,344 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -107,6 +107,7 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +    float fullArea = -1.0f, midArea = -1.0f;
 +    uint32_t coarse = 5u; // raw rate code, (log2(w) << 2) | log2(h)
 +    bool autoCoarse = false;
++    uint32_t mid = 5u; // rate of the mid_area ring; used no coarser than `coarse`
 +    uint32_t minSize = 700u;
 +    uint32_t onlySamples = 0u, onlyFormat = 0u;
 +    uint32_t forceW = 0u, forceH = 0u;
@@ -184,6 +185,21 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +        return true;
 +      };
 +
++      // "2x1" or a raw rate code.
++      auto rate = [&](uint32_t &out) {
++        unsigned w = 0u, h = 0u;
++        char tail = 0;
++        if (std::sscanf(lower(value).c_str(), "%ux%u%c", &w, &h, &tail) == 2)
++        {
++          if ((w != 1u && w != 2u && w != 4u) || (h != 1u && h != 2u && h != 4u)) return false;
++          out = ((w >> 1u) << 2u) | (h >> 1u);
++          return true;
++        }
++        if (!number(0.0, 15.0) || n != std::floor(n) || !validRateCode(uint32_t(n))) return false;
++        out = uint32_t(n);
++        return true;
++      };
++
 +      if (key == "enabled" || key == "vrs") { if (!parseBool(value, b)) return false; enabled = b; }
 +      else if (key == "r1") { if (!number(0.0, 10.0)) return false; r1 = float(n); }
 +      else if (key == "r2") { if (!number(0.0, 10.0)) return false; r2 = float(n); }
@@ -191,23 +207,10 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +      else if (key == "mid_area") { if (!number(-1.0, 100.0)) return false; midArea = n < 0.0 ? -1.0f : float(n); }
 +      else if (key == "coarse" || key == "maxrate")
 +      {
-+        const std::string v = lower(value);
-+        unsigned w = 0u, h = 0u;
-+        char tail = 0;
-+        if (v == "auto") { autoCoarse = true; }
-+        else if (std::sscanf(v.c_str(), "%ux%u%c", &w, &h, &tail) == 2)
-+        {
-+          if ((w != 1u && w != 2u && w != 4u) || (h != 1u && h != 2u && h != 4u)) return false;
-+          coarse = ((w >> 1u) << 2u) | (h >> 1u);
-+          autoCoarse = false;
-+        }
-+        else
-+        {
-+          if (!number(0.0, 15.0) || n != std::floor(n) || !validRateCode(uint32_t(n))) return false;
-+          coarse = uint32_t(n);
-+          autoCoarse = false;
-+        }
++        if (lower(value) == "auto") { autoCoarse = true; }
++        else { if (!rate(coarse)) return false; autoCoarse = false; }
 +      }
++      else if (key == "mid") { if (!rate(mid)) return false; }
 +      else if (key == "minsize") { if (!number(1.0, 65536.0)) return false; minSize = uint32_t(n); }
 +      else if (key == "samples") { if (!number(0.0, 64.0)) return false; onlySamples = uint32_t(n); }
 +      else if (key == "fmt") { if (!number(0.0, 4294967295.0)) return false; onlyFormat = uint32_t(n); }
@@ -267,7 +270,7 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +    {
 +      return enabled == o.enabled && r1 == o.r1 && r2 == o.r2
 +          && fullArea == o.fullArea && midArea == o.midArea
-+          && coarse == o.coarse && autoCoarse == o.autoCoarse && minSize == o.minSize
++          && coarse == o.coarse && autoCoarse == o.autoCoarse && mid == o.mid && minSize == o.minSize
 +          && onlySamples == o.onlySamples && onlyFormat == o.onlyFormat
 +          && forceW == o.forceW && forceH == o.forceH && debug == o.debug && dot == o.dot
 +          && dotRadius == o.dotRadius && flipY == o.flipY && swapEyes == o.swapEyes
@@ -283,11 +286,11 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +      static const char *const fakes[] = {"none", "x", "y", "circle", "fixed", "grid"};
 +      char text[512];
 +      std::snprintf(text, sizeof(text),
-+          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u fmt=%u samples=%u"
++          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u mid=%u fmt=%u samples=%u"
 +          " minsize=%u size=%ux%u flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
 +          " fallback=%s dot=%d debug=%d",
 +          int(enabled), double(fullArea), double(midArea), double(r1), double(r2),
-+          autoCoarse ? "auto/" : "", coarse, onlyFormat, onlySamples, minSize, forceW, forceH,
++          autoCoarse ? "auto/" : "", coarse, mid, onlyFormat, onlySamples, minSize, forceW, forceH,
 +          int(flipY), int(swapEyes), double(gainY), fakes[uint32_t(fake)], holdMs,
 +          fallback == GazeFallback::Center ? "center" : "off", int(dot), int(debug));
 +      return text;
@@ -298,7 +301,7 @@ index 0000000000000000000000000000000000000000..12a7f2bc5185163d93162b4ffa2f6f14
 +  inline const std::vector<std::string> &gazeConfigEnvKeys()
 +  {
 +    static const std::vector<std::string> keys = {
-+        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MINSIZE", "SAMPLES", "FMT",
++        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MID", "MINSIZE", "SAMPLES", "FMT",
 +        "SIZE", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
 +        "FLIPX_L", "FLIPX_R", "FLIPY_L", "FLIPY_R", "FAKE", "HOLD_MS", "FALLBACK"};
 +    return keys;
@@ -462,10 +465,10 @@ index 0000000000000000000000000000000000000000..71ccea173ad3aeef185dd74e3a582e53
 \ No newline at end of file
 diff --git a/src/dxvk/dxvk_gaze_map.h b/src/dxvk/dxvk_gaze_map.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..92d164de0e602c99dd48c7ed88b7cab8c94e2f40
+index 0000000000000000000000000000000000000000..e393c38c2064c463c6fc5488bfcd775e14d8d264
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_map.h
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,195 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -490,7 +493,7 @@ index 0000000000000000000000000000000000000000..92d164de0e602c99dd48c7ed88b7cab8
 +    std::array<uint32_t, 2> texel = {16u, 16u};
 +    std::array<float, 2> fx = {}, fy = {};
 +    std::array<int32_t, 4> center = {}, dotCenter = {};
-+    uint32_t flags = 0u, coarse = 5u;
++    uint32_t flags = 0u, coarse = 5u, mid = 5u;
 +    float r1 = 0.20f, r2 = 0.40f;
 +    float fullArea = -1.0f, midArea = -1.0f;
 +
@@ -499,6 +502,7 @@ index 0000000000000000000000000000000000000000..92d164de0e602c99dd48c7ed88b7cab8
 +      // Preserve the existing tile-granularity gaze update cache.
 +      return shape == other.shape && texel == other.texel
 +          && center == other.center && flags == other.flags && coarse == other.coarse
++          && mid == other.mid
 +          && r1 == other.r1 && r2 == other.r2
 +          && fullArea == other.fullArea && midArea == other.midArea;
 +    }
@@ -532,7 +536,9 @@ index 0000000000000000000000000000000000000000..92d164de0e602c99dd48c7ed88b7cab8
 +    };
 +    const float r1 = radius(request.fullArea, request.r1);
 +    const float r2 = radius(request.midArea, request.r2);
-+    const uint32_t mid = std::min(5u, request.coarse);
++    // The mid ring is never coarser than the outer area in either direction.
++    const uint32_t mid = (std::min(request.mid >> 2u, request.coarse >> 2u) << 2u)
++        | std::min(request.mid & 3u, request.coarse & 3u);
 +    for (uint32_t l = 0u; l < layers; l++)
 +    {
 +      for (uint32_t ty = 0u; ty < tilesY; ty++)
@@ -1091,10 +1097,10 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c08237de835f
+index 0000000000000000000000000000000000000000..8f0bce3c71d6a069cc33c28c5f145d3bf4b40d7b
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
-@@ -0,0 +1,712 @@
+@@ -0,0 +1,716 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <cstdio>
@@ -1142,7 +1148,7 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    // Written by the render thread, reported in the status file.
 +    std::atomic<uint32_t> candidates = {0u}, attached = {0u}, uploads = {0u};
 +    std::atomic<uint32_t> width = {0u}, height = {0u}, layers = {0u}, format = {0u},
-+        samples = {0u}, coarse = {0u};
++        samples = {0u}, coarse = {0u}, mid = {0u};
 +    VkExtent2D texel = {};
 +
 +    // Worker thread only from here on.
@@ -1204,16 +1210,17 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    void writeStatus()
 +    {
 +      static const char *const states[] = {"none", "live", "held", "fallback", "fake"};
-+      const uint32_t code = coarse.load();
++      const uint32_t code = coarse.load(), midCode = mid.load();
 +      char text[512];
 +      const int length = std::snprintf(text, sizeof(text),
 +          "tick=%u\nenabled=%d\ngaze=%s\nsource=%s\ncandidate_passes_per_s=%u\n"
 +          "foveated_passes_per_s=%u\nmap_uploads_per_s=%u\npass=%ux%u layers=%u fmt=%u samples=%u\n"
-+          "coarse=%ux%u\ntexel=%ux%u\n",
++          "coarse=%ux%u\nmid=%ux%u\ntexel=%ux%u\n",
 +          ++statusTick, int(file.config().enabled), states[uint32_t(source.state())],
 +          source.sourceOpen() ? "open" : "closed", candidates.exchange(0u), attached.exchange(0u),
 +          uploads.exchange(0u), width.load(), height.load(), layers.load(), format.load(),
-+          samples.load(), 1u << (code >> 2u), 1u << (code & 3u), texel.width, texel.height);
++          samples.load(), 1u << (code >> 2u), 1u << (code & 3u),
++          1u << (midCode >> 2u), 1u << (midCode & 3u), texel.width, texel.height);
 +      if (length <= 0)
 +        return;
 +      if (std::FILE *out = std::fopen(statusPath.c_str(), "wb"))
@@ -1476,23 +1483,20 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +
 +  // Never hand the driver a rate it did not advertise for this sample count:
 +  // pick the requested rate, or the largest supported one that is no coarser.
++  uint32_t DxvkGazeVrs::resolveRate(uint32_t requested, VkSampleCountFlagBits samples)
++  {
++    for (uint32_t candidate : queryRates(samples).codes)
++    {
++      if ((candidate >> 2u) <= (requested >> 2u) && (candidate & 3u) <= (requested & 3u))
++        return candidate;
++    }
++    return 0u;
++  }
++
 +  uint32_t DxvkGazeVrs::resolveCoarse(VkSampleCountFlagBits samples)
 +  {
-+    const RateSet &set = queryRates(samples);
-+    uint32_t code = set.codes.front();
-+
-+    if (!m_cfg.autoCoarse)
-+    {
-+      code = 0u;
-+      for (uint32_t candidate : set.codes)
-+      {
-+        if ((candidate >> 2u) <= (m_cfg.coarse >> 2u) && (candidate & 3u) <= (m_cfg.coarse & 3u))
-+        {
-+          code = candidate;
-+          break;
-+        }
-+      }
-+    }
++    const uint32_t code = m_cfg.autoCoarse
++        ? queryRates(samples).codes.front() : resolveRate(m_cfg.coarse, samples);
 +
 +    const uint32_t key = code | (uint32_t(samples) << 8u) | (m_cfg.autoCoarse ? 1u << 16u : m_cfg.coarse << 17u);
 +    if (m_loggedCoarse.size() < 64u
@@ -1594,6 +1598,8 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +
 +    m_mapWorker->candidates.fetch_add(1u, std::memory_order_relaxed);
 +    const uint32_t coarse = resolveCoarse(samples);
++    const uint32_t mid = resolveRate((std::min(m_cfg.mid >> 2u, coarse >> 2u) << 2u)
++        | std::min(m_cfg.mid & 3u, coarse & 3u), samples);
 +
 +    const uint32_t tilesX = (extent.width + m_texel.width - 1u) / m_texel.width;
 +    const uint32_t tilesY = (extent.height + m_texel.height - 1u) / m_texel.height;
@@ -1630,6 +1636,7 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    request.shape = shape;
 +    request.texel = {m_texel.width, m_texel.height};
 +    request.coarse = coarse;
++    request.mid = mid;
 +    request.r1 = cfg.r1;
 +    request.r2 = cfg.r2;
 +    request.fullArea = cfg.fullArea;
@@ -1653,6 +1660,7 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    };
 +    const bool upload = back >= 0 && m_cpuMap && m_cpuMap->valid
 +        && m_cpuMap->request.shape == shape && m_cpuMap->request.coarse == coarse
++        && m_cpuMap->request.mid == mid
 +        && (m_buffers.active < 0 || !matches(m_slots[m_buffers.active]));
 +
 +    VkImageSubresourceRange allLayers = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
@@ -1736,7 +1744,8 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    if (!m_cpuMap || !m_cpuMap->valid || m_buffers.active < 0
 +        || !m_slots[m_buffers.active]->filled
 +        || m_slots[m_buffers.active]->request.shape != shape
-+        || m_slots[m_buffers.active]->request.coarse != coarse)
++        || m_slots[m_buffers.active]->request.coarse != coarse
++        || m_slots[m_buffers.active]->request.mid != mid)
 +      return false;
 +
 +    auto &front = m_slots[m_buffers.active];
@@ -1750,6 +1759,7 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +    m_mapWorker->format.store(uint32_t(colorFormat), std::memory_order_relaxed);
 +    m_mapWorker->samples.store(uint32_t(samples), std::memory_order_relaxed);
 +    m_mapWorker->coarse.store(coarse, std::memory_order_relaxed);
++    m_mapWorker->mid.store(mid, std::memory_order_relaxed);
 +
 +    const bool grid = cfg.fake == GazeFake::Grid;
 +    // Debug overlay (sbs only): colored squares drawn at the end of the pass.
@@ -1809,10 +1819,10 @@ index 0000000000000000000000000000000000000000..b83e65584b2c994492583cb200b9c082
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.h b/src/dxvk/dxvk_gaze_vrs.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f4ebdcf55b06164283b462dcf0559bb112c4dd8
+index 0000000000000000000000000000000000000000..b48f14ae2c59fa1d85bb8ada8ce39eb11dd87dc6
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.h
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,102 @@
 +#pragma once
 +
 +#include "dxvk_gaze_buffer.h"
@@ -1905,6 +1915,7 @@ index 0000000000000000000000000000000000000000..9f4ebdcf55b06164283b462dcf0559bb
 +    std::vector<RateSet> m_rates;
 +    std::vector<uint32_t> m_loggedCoarse; // one log line per distinct outcome
 +    const RateSet &queryRates(VkSampleCountFlagBits samples);
++    uint32_t resolveRate(uint32_t requested, VkSampleCountFlagBits samples);
 +    uint32_t resolveCoarse(VkSampleCountFlagBits samples);
 +
 +    std::map<std::array<uint32_t, 5>, uint32_t> m_shapes; // (w, h, layers, fmt, samples) -> pass count

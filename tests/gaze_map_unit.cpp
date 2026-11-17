@@ -59,7 +59,8 @@ static void checkPixels(const GazeMapRequest &r)
         const float lx=sbs ? px-float(eye)*eyeW : px;
         const float d=std::hypot(lx-r.fx[eye]*eyeW,py-r.fy[eye]*r.shape[1])/minD;
         uint8_t expected=0u;
-        if (d>=r1) expected=uint8_t(d>=r2 ? r.coarse:std::min(5u,r.coarse));
+        const uint32_t mid=(std::min(r.mid>>2u,r.coarse>>2u)<<2u)|std::min(r.mid&3u,r.coarse&3u);
+        if (d>=r1) expected=uint8_t(d>=r2 ? r.coarse:mid);
         assert(result.data[size_t(l)*stride+y*tx+x]==expected);
       }
     for (uint32_t i=tx*ty; i<stride; ++i) assert(result.data[size_t(l)*stride+i]==0u);
@@ -117,10 +118,11 @@ int main()
 {
   for (uint32_t layers : {1u,2u})
     for (uint32_t coarse : {0u,5u,10u})
+     for (uint32_t mid : {1u,4u,5u})
       for (float area : {-1.0f,0.0f,45.0f,100.0f})
       {
         auto r=request(); r.shape={137u,73u,layers,97u,1u};
-        r.fx={0.13f,0.91f};r.fy={0.77f,0.22f};r.coarse=coarse;
+        r.fx={0.13f,0.91f};r.fy={0.77f,0.22f};r.coarse=coarse;r.mid=mid;
         r.fullArea=area;r.midArea=area<0.0f ? -1.0f:std::max(65.0f,area);
         checkPixels(r);
       }

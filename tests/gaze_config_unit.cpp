@@ -38,6 +38,8 @@ int main() {
   assert(c.set("coarse", "2x4") && c.coarse == 6);
   assert(c.set("coarse", "auto") && c.autoCoarse);
   assert(c.set("coarse", "5") && c.coarse == 5 && !c.autoCoarse);
+  assert(c.mid == 5 && c.set("mid", "2x1") && c.mid == 4 && c.set("mid", "1") && c.mid == 1);
+  assert(!c.set("mid", "auto") && !c.set("mid", "3x3") && c.mid == 1);
   assert(c.set("enabled", "off") && !c.enabled && c.set("vrs", "1") && c.enabled);
   assert(c.set("flipx_l", "1") && c.forceFlipX[0] == 1 && c.set("flipx_l", "auto") && c.forceFlipX[0] == -1);
   assert(c.set("fallback", "center") && c.fallback == GazeFallback::Center);

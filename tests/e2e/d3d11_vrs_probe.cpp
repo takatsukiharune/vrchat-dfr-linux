@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Offscreen D3D11 probe for the DXVK gaze-VRS patch. Draws a per-pixel hash
 // into a side-by-side RGBA16F eye target and reports, per 8x8 tile, how
-// coarsely it was shaded: '0' = every pixel, '1' = 2x2, '2' = 4x4 or coarser.
+// coarsely it was shaded: '0' = every pixel, 'h' = 2x1 or 1x2, '1' = 2x2,
+// '2' = 4x4 or coarser.
 #include <windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -101,7 +102,7 @@ int main(int argc, char** argv) {
         }
         std::sort(values.begin(), values.end());
         const auto distinct = std::unique(values.begin(), values.end()) - values.begin();
-        grid += distinct > 16 ? '0' : distinct > 4 ? '1' : '2';
+        grid += distinct > 32 ? '0' : distinct > 16 ? 'h' : distinct > 4 ? '1' : '2';
       }
       grid += '\n';
     }
