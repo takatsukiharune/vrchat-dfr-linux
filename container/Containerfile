@@ -1,5 +1,14 @@
-# Build and test image. `build` has the toolchains; `e2e` adds Wine, Mesa and
-# the Vulkan validation layer for the end-to-end test.
+# `build` has the DXVK toolchain and runs the unit tests. `e2e` adds Wine, Mesa
+# and the Vulkan validation layer for the end-to-end test.
+#
+# `bridge` builds openxr-gaze-bridge and dfrctl. They run on the host, not in
+# Proton, and a binary needs the glibc it was built with or a newer one, so
+# this stage uses an older distribution than the others.
+FROM docker.io/library/ubuntu@sha256:73b999393d07f2bf65a40373778a44dc9a6d54ad7718d29247d8ff9413c4d6a8 AS bridge
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ pkg-config libopenxr-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 FROM registry.fedoraproject.org/fedora@sha256:3632de47c2cef45d6a6ea6a420280ff9ce452e225a1b291299c105b9d9bae471 AS build
 RUN dnf install -y git patch meson ninja-build gcc-c++ pkgconf-pkg-config python3 diffutils findutils which procps-ng \
       mingw64-gcc-c++ mingw64-winpthreads-static mingw64-headers glslang openxr-devel \

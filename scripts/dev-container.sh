@@ -7,6 +7,7 @@
 #   scripts/dev-container.sh build [--proton DIR | --variant NAME | --ref REF]
 #                                     DXVK DLLs for the pinned commit, a Proton build or
 #                                     any DXVK commit, and dist/gaze/*
+#   scripts/dev-container.sh bridge   dist/gaze/* only (built on Ubuntu 24.04 for older hosts)
 #   scripts/dev-container.sh check [REF..]
 #                                     do the patches apply? See scripts/dxvk-patches.sh
 #   scripts/dev-container.sh test     unit and bridge tests (no GPU needed)
@@ -38,7 +39,7 @@ run() {
     [[ "$1" == "--" ]] && { shift; break; }
     options+=("$1"); shift
   done
-  [[ -e "$repo_dir/dxvk/.git" ]] || git -C "$repo_dir" submodule update --init dxvk
+  [[ "$stage" == bridge || -e "$repo_dir/dxvk/.git" ]] || git -C "$repo_dir" submodule update --init dxvk
   mkdir -p "$repo_dir/dist"
   "$engine" run --rm --init --security-opt label=disable --userns=keep-id \
     -v "$repo_dir":/src:ro -v "$repo_dir/dist":/src/dist -v "$volume":/work:U -w /src \
@@ -49,11 +50,14 @@ run() {
 
 gpu=()
 [[ -d /dev/dri ]] && gpu=(--device=/dev/dri --group-add=keep-groups)
-build="bash scripts/build-openxr-bridge.sh && bash scripts/build-dxvk.sh"
+bridge="bash scripts/build-openxr-bridge.sh"
+build="bash scripts/build-dxvk.sh"
 
 case "${1:-}" in
+  bridge) run bridge "$bridge" ;;
   build)
     shift
+    run bridge "$bridge"
     if [[ "${1:-}" == "--proton" ]]; then
       proton="$(resolve_proton "${2:?--proton needs a Proton directory or name}")" \
         || { echo "No Proton build '$2'. Found:" >&2; list_proton_installs >&2; exit 1; }
@@ -66,14 +70,15 @@ case "${1:-}" in
   check) shift; run build "bash scripts/dxvk-patches.sh check $*" ;;
   test)  run build "bash scripts/test-gaze-bridge.sh" ;;
   e2e)   shift; run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh $*" ;;
-  all)   run build "$build && bash scripts/test-gaze-bridge.sh"
+  all)   run bridge "$bridge"
+         run build "$build && bash scripts/test-gaze-bridge.sh"
          run e2e "${gpu[@]}" -- "bash scripts/test-dxvk-e2e.sh" ;;
   shell) run e2e -it "${gpu[@]}" -- bash ;;
   rm)
-    "$engine" images --format '{{.Repository}}:{{.Tag}}' | grep -E '^localhost/vrchat-dfr-(build|e2e):' \
+    "$engine" images --format '{{.Repository}}:{{.Tag}}' | grep -E '^localhost/vrchat-dfr-(bridge|build|e2e):' \
       | xargs -r "$engine" rmi >/dev/null
     "$engine" volume rm -f "$volume" >/dev/null
     echo "Removed the vrchat-dfr images and volume"
     ;;
-  *) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

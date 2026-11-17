@@ -61,8 +61,9 @@ jobs:
           sudo apt-get install -y build-essential libopenxr-dev pkg-config python3
       - name: Test projection, shared memory and OpenXR lifecycle
         run: bash scripts/test-gaze-bridge.sh
+      # In the pinned Ubuntu 24.04 image, like a local build.
       - name: Build
-        run: bash scripts/build-openxr-bridge.sh
+        run: bash scripts/dev-container.sh bridge
       - uses: actions/upload-artifact@v4
         with:
           name: openxr-gaze-bridge-linux-x86_64

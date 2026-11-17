@@ -259,10 +259,14 @@ own clone and does not change the submodule.
 
 The container needs only podman. It mounts the repository read-only apart from
 `dist/`, and it does not touch the host's Proton, Wine prefix or VR runtime.
-Each command runs in a new container that is deleted afterwards.
+Each command runs in a new container that is deleted afterwards. DXVK and the
+tests use a Fedora image. The bridge and `dfrctl` run on the host, so they are
+built in an Ubuntu 24.04 image and need that glibc (2.39) or a newer one, plus the
+host's OpenXR loader.
 
 ```bash
 bash scripts/dev-container.sh all                   # build + every test; results land in dist/
+bash scripts/dev-container.sh bridge                # only dist/gaze/{openxr-gaze-bridge,dfrctl}
 bash scripts/dev-container.sh build --proton NAME   # DXVK for the commit that Proton build ships
 bash scripts/dev-container.sh build --variant GE-Proton11-12   # the same by release name, without a local Proton build
 bash scripts/dev-container.sh build --ref v3.1.1    # DXVK for any upstream commit, tag or branch
