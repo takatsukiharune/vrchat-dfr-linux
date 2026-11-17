@@ -59,8 +59,10 @@ Proton build itself.
 ./scripts/install-dxvk.sh GE-Proton11-12        # makes GE-Proton11-12-dfr
 ```
 
-Restart Steam and select `GE-Proton11-12-dfr` as the compatibility tool for
-the game. `uninstall-dxvk.sh GE-Proton11-12-dfr` deletes the copy.
+The copy's Steam name is the source's name plus `-dfr`, here
+`GE-Proton11-12-x86_64-dfr`. Restart Steam and select it as the compatibility
+tool for the game. `uninstall-dxvk.sh GE-Proton11-12` deletes the copy again.
+Both scripts take the source or the copy.
 
 The DLLs must come from the DXVK commit the Proton build ships. `build
 --proton` reads that commit from the Proton build and builds for it. The
@@ -225,7 +227,7 @@ config file, under the name without `DXVK_GAZE_` in lower case (`full_area`,
 | `DXVK_GAZE_FLIP_Y=1` | Flip scene-pass Y |
 | `DXVK_GAZE_FULL_AREA` | Percent of the eye image that renders at full rate |
 | `DXVK_GAZE_MID_AREA` | Percent rendered at full rate or at `MID`; beyond it uses `COARSE` |
-| `DXVK_GAZE_MID` | Rate of the ring between `FULL_AREA` and `MID_AREA`: `1x1`, `2x1`, `1x2` or `2x2` (default). Never coarser than `COARSE` |
+| `DXVK_GAZE_MID` | Rate of the ring between `FULL_AREA` and `MID_AREA`: `auto` (default: 2x2, or `COARSE` where that is finer), `1x1`, `2x1`, `1x2` or `2x2`. Never coarser than `COARSE` |
 | `DXVK_GAZE_R1` / `R2` | Inner / outer radius of the sharp region |
 | `DXVK_GAZE_COARSE` | Outer shading rate: `auto` (coarsest the GPU supports), `2x2`, `4x4`, ... or a raw rate code. Clamped to what the GPU supports |
 | `DXVK_GAZE_DEBUG=1` | Pass/gaze diagnostics |

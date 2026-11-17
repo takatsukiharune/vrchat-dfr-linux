@@ -13,7 +13,7 @@ flip_y = 1
 full_area = 45
 mid_area = 65
 coarse = auto
-# mid = 2x1        # a half step for the ring between the two, default 2x2
+# mid = 2x1        # a half step for the ring between the two; default auto (2x2)
 
 # Blinks and short dropouts: keep the last gaze for this long, then render at
 # full rate (off) or foveate around the eye centre (center).
