@@ -47,6 +47,8 @@ const char* const keys =
   "samples      MSAA sample count of the scene pass, 0 = any\n"
   "minsize      smallest eye-pass height considered\n"
   "size         WxH          only this pass size, 0 = automatic\n"
+  "need_depth   0|1          require a depth attachment and active depth test or write\n"
+  "draw_filter  0|1          promote passes from stereo viewports and shade other draws at 1x1\n"
   "flip_y, swap_eyes  0|1    gaze orientation\n"
   "flipx_l, flipx_r, flipy_l, flipy_r  0|1|auto   per-eye flips\n"
   "gain_y       0..10        scale vertical gaze offset around the centre\n"

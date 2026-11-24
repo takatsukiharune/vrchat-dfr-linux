@@ -42,6 +42,9 @@ int main(int argc, char** argv) {
   const std::string mode = argc > 6 ? argv[6] : "";
   const bool bench = mode == "bench";
   const bool multipass = mode == "multipass";
+  const bool nodepth = mode == "nodepth";
+  const bool fullvp = mode == "fullvp";
+  const bool overlay = mode == "overlay";
 
   ID3D11Device* device = nullptr;
   ID3D11DeviceContext* context = nullptr;
@@ -64,10 +67,36 @@ int main(int argc, char** argv) {
   ID3D11RenderTargetView* rtv = nullptr;
   CHECK(device->CreateRenderTargetView(target, nullptr, &rtv));
 
+  D3D11_TEXTURE2D_DESC depthDesc = {};
+  depthDesc.Width = width; depthDesc.Height = height; depthDesc.MipLevels = 1; depthDesc.ArraySize = 1;
+  depthDesc.Format = DXGI_FORMAT_D32_FLOAT;
+  depthDesc.SampleDesc.Count = samples;
+  depthDesc.Usage = D3D11_USAGE_DEFAULT;
+  depthDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+  ID3D11Texture2D* depthTex = nullptr;
+  ID3D11DepthStencilView* dsv = nullptr;
+  CHECK(device->CreateTexture2D(&depthDesc, nullptr, &depthTex));
+  CHECK(device->CreateDepthStencilView(depthTex, nullptr, &dsv));
+
+  D3D11_DEPTH_STENCIL_DESC dssOnDesc = {};
+  dssOnDesc.DepthEnable = TRUE;
+  dssOnDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+  dssOnDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+  ID3D11DepthStencilState* dssOn = nullptr;
+  CHECK(device->CreateDepthStencilState(&dssOnDesc, &dssOn));
+
+  D3D11_DEPTH_STENCIL_DESC dssOffDesc = {};
+  dssOffDesc.DepthEnable = FALSE;
+  dssOffDesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+  dssOffDesc.DepthFunc = D3D11_COMPARISON_ALWAYS;
+  ID3D11DepthStencilState* dssOff = nullptr;
+  CHECK(device->CreateDepthStencilState(&dssOffDesc, &dssOff));
+
   // In multipass mode, render two more candidate passes per frame: a 1x
   // full-size pass and a 1x 1536x768 pass. A second D3D11 device also draws
   // a 256x256 non-candidate pass.
   ID3D11RenderTargetView *postRtv = nullptr, *smallRtv = nullptr;
+  ID3D11DepthStencilView *postDsv = nullptr, *smallDsv = nullptr;
   ID3D11Device* auxDevice = nullptr;
   ID3D11DeviceContext* auxContext = nullptr;
   ID3D11RenderTargetView* auxRtv = nullptr;
@@ -76,6 +105,12 @@ int main(int argc, char** argv) {
   const UINT smallW = 1536, smallH = 768;
   if (multipass) {
     CHECK(device->CreateRenderTargetView(resolved, nullptr, &postRtv));
+    D3D11_TEXTURE2D_DESC postDepthDesc = depthDesc;
+    postDepthDesc.SampleDesc.Count = 1;
+    ID3D11Texture2D* postDepthTex = nullptr;
+    CHECK(device->CreateTexture2D(&postDepthDesc, nullptr, &postDepthTex));
+    CHECK(device->CreateDepthStencilView(postDepthTex, nullptr, &postDsv));
+
     D3D11_TEXTURE2D_DESC smallDesc = {};
     smallDesc.Width = smallW; smallDesc.Height = smallH; smallDesc.MipLevels = 1; smallDesc.ArraySize = 1;
     smallDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -85,6 +120,11 @@ int main(int argc, char** argv) {
     ID3D11Texture2D* smallTex = nullptr;
     CHECK(device->CreateTexture2D(&smallDesc, nullptr, &smallTex));
     CHECK(device->CreateRenderTargetView(smallTex, nullptr, &smallRtv));
+    D3D11_TEXTURE2D_DESC smallDepthDesc = postDepthDesc;
+    smallDepthDesc.Width = smallW; smallDepthDesc.Height = smallH;
+    ID3D11Texture2D* smallDepthTex = nullptr;
+    CHECK(device->CreateTexture2D(&smallDepthDesc, nullptr, &smallDepthTex));
+    CHECK(device->CreateDepthStencilView(smallDepthTex, nullptr, &smallDsv));
 
     CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &level, 1,
       D3D11_SDK_VERSION, &auxDevice, nullptr, &auxContext));
@@ -111,12 +151,37 @@ int main(int argc, char** argv) {
     CHECK(auxDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &auxPs));
   }
 
-  const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
+  const D3D11_VIEWPORT vpLeft = {0, 0, float(width) * 0.5f, float(height), 0, 1};
+  const D3D11_VIEWPORT vpRight = {float(width) * 0.5f, 0, float(width) * 0.5f, float(height), 0, 1};
+  const D3D11_VIEWPORT vpOverlayL = {0, 0, float(width) * 0.5f, float(height) * 0.25f, 0, 1};
+  const D3D11_VIEWPORT vpOverlayR = {float(width) * 0.5f, 0, float(width) * 0.5f, float(height) * 0.25f, 0, 1};
   const float clear[4] = {0, 0, 0, 1};
   const UINT tilesX = width / 8, tilesY = height / 8;
   std::string grid;
   std::vector<uint16_t> values(64);
   DWORD start = GetTickCount();
+
+  auto drawStereo = [&](ID3D11RenderTargetView* targetRtv, ID3D11DepthStencilView* targetDsv, UINT w, UINT h, bool useFullVp) {
+    context->OMSetRenderTargets(1, &targetRtv, targetDsv);
+    context->OMSetDepthStencilState(targetDsv ? dssOn : dssOff, 0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(vs, nullptr, 0);
+    context->PSSetShader(ps, nullptr, 0);
+    context->ClearRenderTargetView(targetRtv, clear);
+    if (targetDsv) context->ClearDepthStencilView(targetDsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    if (useFullVp) {
+      const D3D11_VIEWPORT full = {0, 0, float(w), float(h), 0, 1};
+      context->RSSetViewports(1, &full);
+      context->Draw(3, 0);
+    } else {
+      const D3D11_VIEWPORT left = {0, 0, float(w) * 0.5f, float(h), 0, 1};
+      const D3D11_VIEWPORT right = {float(w) * 0.5f, 0, float(w) * 0.5f, float(h), 0, 1};
+      context->RSSetViewports(1, &left);
+      context->Draw(3, 0);
+      context->RSSetViewports(1, &right);
+      context->Draw(3, 0);
+    }
+  };
 
   if (bench) {
     // Reading one pixel back after each frame waits for the GPU, so the wall
@@ -131,11 +196,14 @@ int main(int argc, char** argv) {
       const double elapsed = (GetTickCount() - start) / 1000.0;
       if (!measuring && elapsed >= warmup) { measuring = true; frames = 0; start = GetTickCount(); }
       else if (measuring && elapsed >= seconds) break;
-      context->OMSetRenderTargets(1, &rtv, nullptr);
-      context->RSSetViewports(1, &viewport);
+      context->OMSetRenderTargets(1, &rtv, dsv);
+      context->OMSetDepthStencilState(dssOn, 0);
       context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       context->VSSetShader(vs, nullptr, 0);
       context->PSSetShader(ps, nullptr, 0);
+      context->RSSetViewports(1, &vpLeft);
+      context->Draw(3, 0);
+      context->RSSetViewports(1, &vpRight);
       context->Draw(3, 0);
       context->OMSetRenderTargets(0, nullptr, nullptr);
       if (samples > 1) context->ResolveSubresource(resolved, 0, target, 0, desc.Format);
@@ -152,26 +220,21 @@ int main(int argc, char** argv) {
   }
 
   for (unsigned frame = 1; (GetTickCount() - start) / 1000.0 < seconds; ++frame) {
-    context->OMSetRenderTargets(1, &rtv, nullptr);
-    context->RSSetViewports(1, &viewport);
-    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    context->VSSetShader(vs, nullptr, 0);
-    context->PSSetShader(ps, nullptr, 0);
-    context->ClearRenderTargetView(rtv, clear);
-    context->Draw(3, 0);
+    drawStereo(rtv, nodepth ? nullptr : dsv, width, height, fullvp);
+    if (overlay) {
+      // Draw a 2D UI strip in the top 25% of the same pass with depth disabled.
+      context->OMSetDepthStencilState(dssOff, 0);
+      context->RSSetViewports(1, &vpOverlayL);
+      context->Draw(3, 0);
+      context->RSSetViewports(1, &vpOverlayR);
+      context->Draw(3, 0);
+    }
     context->OMSetRenderTargets(0, nullptr, nullptr);
     if (multipass) {
       // Draw a 1x pass at the same size as the main pass.
-      context->OMSetRenderTargets(1, &postRtv, nullptr);
-      context->RSSetViewports(1, &viewport);
-      context->ClearRenderTargetView(postRtv, clear);
-      context->Draw(3, 0);
+      drawStereo(postRtv, postDsv, width, height, false);
       // Draw a smaller 1x side-by-side pass.
-      const D3D11_VIEWPORT smallVp = {0, 0, float(smallW), float(smallH), 0, 1};
-      context->OMSetRenderTargets(1, &smallRtv, nullptr);
-      context->RSSetViewports(1, &smallVp);
-      context->ClearRenderTargetView(smallRtv, clear);
-      context->Draw(3, 0);
+      drawStereo(smallRtv, smallDsv, smallW, smallH, false);
       context->OMSetRenderTargets(0, nullptr, nullptr);
       // Draw a small non-candidate pass on a separate D3D11 device.
       const D3D11_VIEWPORT auxVp = {0, 0, 256.0f, 256.0f, 0, 1};

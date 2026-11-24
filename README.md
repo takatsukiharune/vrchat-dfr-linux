@@ -240,6 +240,8 @@ config file, under the name without `DXVK_GAZE_` in lower case (`full_area`,
 | `DXVK_GAZE_FLIPX_L/R`, `FLIPY_L/R` | Force per-eye X/Y flip |
 | `DXVK_GAZE_FAKE=x/y/circle/fixed/grid` | Synthetic gaze modes |
 | `DXVK_GAZE_SIZE=WxH`, `SAMPLES` | Force size / sample count |
+| `DXVK_GAZE_NEED_DEPTH` | Require a depth attachment and active depth test or write (default 1) |
+| `DXVK_GAZE_DRAW_FILTER` | Promote passes from stereo draw viewports and shade other draws at 1x1 (default 1) |
 | `DXVK_GAZE_FILE` | Override the gaze file path (Linux or Wine path), read once at start-up |
 
 For a debug run with `PROTON_LOG=1`:

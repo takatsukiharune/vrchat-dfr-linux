@@ -89,7 +89,8 @@ class Scenario:
                          sum(x + 0.5 for x, _ in cells) / n / half if n else -1.0,
                          sum(y + 0.5 for _, y in cells) / n / tiles_y if n else -1.0))
         text = "".join(rows)
-        return {"frame": frame, "eyes": eyes, "classes": set(text), "half": text.count("h") / len(text)}
+        return {"frame": frame, "eyes": eyes, "classes": set(text), "half": text.count("h") / len(text),
+                "rows": rows}
 
     def wait(self, what, predicate, timeout=10.0):
         deadline, state = time.monotonic() + timeout, None
@@ -278,6 +279,73 @@ def run_multipass(args, work, validate):
         s.stop()
 
 
+def run_draw_filter(args, work, validate):
+    """Test need_depth, draw_filter viewport and depth gating, in-pass 1x1 overlays,
+    and side-by-side passes narrower than 1.8 to 1."""
+    L, R = (0.40, 0.70), (0.60, 0.70)
+    base = dict(full_area=5, mid_area=15, coarse="auto", hold_ms=500)
+
+    # A depthless pass stays at full rate when need_depth is 1 and foveates when need_depth is 0.
+    s = Scenario(args, work / "nodepth", 1, validate)
+    (work / "nodepth").mkdir(parents=True)
+    try:
+        s.write_config(**base, need_depth=1, draw_filter=1)
+        s.start_writer(*L, *R)
+        s.start_probe(dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FILE=str(s.gaze),
+                           DXVK_GAZE_CONFIG=str(s.config)), mode=("nodepth",))
+        s.wait("depthless pass stays full rate with need_depth=1", full_rate, 60)
+        s.hold("depthless pass remains full rate", full_rate, 1.0)
+        s.write_config(**base, need_depth=0, draw_filter=1)
+        s.wait("depthless pass foveates when need_depth=0", foveated(0.05, L, R))
+    finally:
+        s.stop()
+
+    # A full-width 2D pass stays at full rate when draw_filter is 1 and foveates when draw_filter is 0.
+    s = Scenario(args, work / "fullvp", 1, validate)
+    (work / "fullvp").mkdir(parents=True)
+    try:
+        s.write_config(**base, need_depth=1, draw_filter=1)
+        s.start_writer(*L, *R)
+        s.start_probe(dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FILE=str(s.gaze),
+                           DXVK_GAZE_CONFIG=str(s.config)), mode=("fullvp",))
+        s.wait("full-width 2D pass stays full rate with draw_filter=1", full_rate, 60)
+        s.hold("full-width 2D pass remains full rate", full_rate, 1.0)
+        s.write_config(**base, need_depth=1, draw_filter=0)
+        s.wait("full-width pass foveates when draw_filter=0", foveated(0.05, L, R))
+    finally:
+        s.stop()
+
+    # A depth-disabled UI strip in the top quarter stays at 1x1 while the rest of the pass foveates.
+    s = Scenario(args, work / "overlay", 1, validate)
+    (work / "overlay").mkdir(parents=True)
+    try:
+        s.write_config(**base, need_depth=1, draw_filter=1)
+        s.start_writer(*L, *R)
+        s.start_probe(dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FILE=str(s.gaze),
+                           DXVK_GAZE_CONFIG=str(s.config)), mode=("overlay",))
+        def overlay_protected(state):
+            rows = state["rows"]
+            top = "".join(rows[:len(rows) // 4])
+            bottom = "".join(rows[len(rows) // 4:])
+            return set(top) == {"0"} and set(bottom) != {"0"} and "0" in bottom
+        s.wait("in-pass depth-disabled overlay stays 1x1 while 3D scene foveates", overlay_protected, 60)
+    finally:
+        s.stop()
+
+    # A 1600x1000 side-by-side pass has aspect ratio 1.6 and still promotes without fmt=97.
+    s = Scenario(args, work / "tall", 1, validate)
+    (work / "tall").mkdir(parents=True)
+    try:
+        s.write_config(**base, need_depth=1, draw_filter=1)
+        s.start_writer(*L, *R)
+        s.start_probe(dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FILE=str(s.gaze),
+                           DXVK_GAZE_CONFIG=str(s.config)), size=(1600, 1000))
+        s.wait("1600x1000 side-by-side pass promotes and foveates without fmt filter",
+               foveated(0.05, L, R), 60)
+    finally:
+        s.stop()
+
+
 def run_baseline(args, work, validate):
     """Same probe without DXVK_GAZE_VRS: nothing may be shaded coarsely."""
     s = Scenario(args, work, 1, validate)
@@ -363,11 +431,17 @@ def main():
     print("gaze VRS, multiple passes and second device:")
     multipass = directory("multipass")
     run_multipass(args, multipass, validate)
+    print("gaze VRS, draw_filter and need_depth:")
+    draw_filter = directory("draw_filter")
+    run_draw_filter(args, draw_filter, validate)
 
     if validate:
-        for work in (baseline, single, msaa, multipass):
-            assert (work / "validation.log").exists(), "validation layer did not load"
-        new = (vuids(single) | vuids(msaa) | vuids(multipass)) - vuids(baseline)
+        val_dirs = [baseline, single, msaa, multipass,
+                    draw_filter / "nodepth", draw_filter / "fullvp",
+                    draw_filter / "overlay", draw_filter / "tall"]
+        for work in val_dirs:
+            assert (work / "validation.log").exists(), f"validation layer did not load in {work}"
+        new = set().union(*(vuids(w) for w in val_dirs[1:])) - vuids(baseline)
         assert not new, f"Vulkan validation errors introduced by gaze VRS: {sorted(new)}"
         print(f"  ok: no Vulkan validation errors beyond the {len(vuids(baseline))} of stock DXVK paths")
     print("DXVK gaze VRS end-to-end checks passed")

@@ -29,6 +29,8 @@ namespace dxvk
     uint32_t minSize = 700u;
     uint32_t onlySamples = 0u, onlyFormat = 0u;
     uint32_t forceW = 0u, forceH = 0u;
+    bool needDepth = true;
+    bool drawFilter = true;
     bool debug = false, dot = false;
     int32_t dotRadius = 24;
     bool flipY = false, swapEyes = false;
@@ -144,6 +146,8 @@ namespace dxvk
         else if (std::sscanf(value.c_str(), "%ux%u%c", &w, &h, &tail) == 2 && w && h) { forceW = w; forceH = h; }
         else return false;
       }
+      else if (key == "need_depth") { if (!parseBool(value, b)) return false; needDepth = b; }
+      else if (key == "draw_filter") { if (!parseBool(value, b)) return false; drawFilter = b; }
       else if (key == "debug") { if (!parseBool(value, b)) return false; debug = b; }
       else if (key == "dot") { if (!parseBool(value, b)) return false; dot = b; }
       else if (key == "dot_radius") { if (!number(1.0, 512.0)) return false; dotRadius = int32_t(n); }
@@ -194,7 +198,8 @@ namespace dxvk
           && fullArea == o.fullArea && midArea == o.midArea
           && coarse == o.coarse && autoCoarse == o.autoCoarse && mid == o.mid && minSize == o.minSize
           && onlySamples == o.onlySamples && onlyFormat == o.onlyFormat
-          && forceW == o.forceW && forceH == o.forceH && debug == o.debug && dot == o.dot
+          && forceW == o.forceW && forceH == o.forceH
+          && needDepth == o.needDepth && drawFilter == o.drawFilter && debug == o.debug && dot == o.dot
           && dotRadius == o.dotRadius && flipY == o.flipY && swapEyes == o.swapEyes
           && forceFlipX[0] == o.forceFlipX[0] && forceFlipX[1] == o.forceFlipX[1]
           && forceFlipY[0] == o.forceFlipY[0] && forceFlipY[1] == o.forceFlipY[1]
@@ -209,10 +214,11 @@ namespace dxvk
       char text[512];
       std::snprintf(text, sizeof(text),
           "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u mid=%u fmt=%u samples=%u"
-          " minsize=%u size=%ux%u flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
+          " minsize=%u size=%ux%u need_depth=%d draw_filter=%d flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
           " fallback=%s dot=%d debug=%d",
           int(enabled), double(fullArea), double(midArea), double(r1), double(r2),
           autoCoarse ? "auto/" : "", coarse, mid, onlyFormat, onlySamples, minSize, forceW, forceH,
+          int(needDepth), int(drawFilter),
           int(flipY), int(swapEyes), double(gainY), fakes[uint32_t(fake)], holdMs,
           fallback == GazeFallback::Center ? "center" : "off", int(dot), int(debug));
       return text;
@@ -233,7 +239,7 @@ namespace dxvk
   {
     static const std::vector<std::string> keys = {
         "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MID", "MINSIZE", "SAMPLES", "FMT",
-        "SIZE", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
+        "SIZE", "NEED_DEPTH", "DRAW_FILTER", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
         "FLIPX_L", "FLIPX_R", "FLIPY_L", "FLIPY_R", "FAKE", "HOLD_MS", "FALLBACK"};
     return keys;
   }

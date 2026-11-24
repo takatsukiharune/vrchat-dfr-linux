@@ -1,25 +1,23 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: vrchat-dfr-linux contributors
  <vrchat-dfr-linux@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 00:00:00 +0000
+Date: Tue, 24 Nov 2026 20:40:23 +0900
 Subject: [dxvk] Hook gaze-driven VRS into rendering
 
-Attach the gaze shading-rate image to eligible passes, create pipelines
-with dynamic shading-rate state when DXVK_GAZE_VRS=1 and query the
-device features the attachment needs.
+Attach the gaze shading-rate image to eligible passes, switch the dynamic shading-rate combiner per draw, create pipelines with dynamic shading-rate state when DXVK_GAZE_VRS=1, and query the device features the attachment needs.
 ---
- src/dxvk/dxvk_cmdlist.h       |  7 ++++
- src/dxvk/dxvk_context.cpp     | 79 ++++++++++++++++++++++++++++++++++-
- src/dxvk/dxvk_context.h       |  2 +
- src/dxvk/dxvk_device_info.cpp |  5 +++
- src/dxvk/dxvk_device_info.h   |  3 ++
- src/dxvk/dxvk_framebuffer.h   |  1 +
- src/dxvk/dxvk_graphics.cpp    | 19 +++++++++
- src/dxvk/dxvk_graphics.h      |  2 +-
- src/dxvk/dxvk_shader.cpp      | 15 +++++++
- src/dxvk/meson.build          |  2 +
- src/vulkan/vulkan_loader.h    |  8 ++++
- 11 files changed, 141 insertions(+), 2 deletions(-)
+ src/dxvk/dxvk_cmdlist.h       |   7 ++
+ src/dxvk/dxvk_context.cpp     | 122 +++++++++++++++++++++++++++++++++-
+ src/dxvk/dxvk_context.h       |   6 ++
+ src/dxvk/dxvk_device_info.cpp |   5 ++
+ src/dxvk/dxvk_device_info.h   |   3 +
+ src/dxvk/dxvk_framebuffer.h   |   1 +
+ src/dxvk/dxvk_graphics.cpp    |  19 ++++++
+ src/dxvk/dxvk_graphics.h      |   2 +-
+ src/dxvk/dxvk_shader.cpp      |  15 +++++
+ src/dxvk/meson.build          |   2 +
+ src/vulkan/vulkan_loader.h    |   8 +++
+ 11 files changed, 188 insertions(+), 2 deletions(-)
 
 diff --git a/src/dxvk/dxvk_cmdlist.h b/src/dxvk/dxvk_cmdlist.h
 index 38891eb0d772615fa39539a6da6ce2aae8bafc35..8365daa1602c43a1805521033a701318b72f3646 100644
@@ -40,7 +38,7 @@ index 38891eb0d772615fa39539a6da6ce2aae8bafc35..8365daa1602c43a1805521033a701318
              float                   depthBiasConstantFactor,
              float                   depthBiasClamp,
 diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
-index 66b2c539e0d1662ee0562a1fe7210b6787038f83..a58b762370e6a237fe036200e117a8821d08caf6 100644
+index 66b2c539e0d1662ee0562a1fe7210b6787038f83..875d0016de3700dad4559d57a5012efc8aed3d86 100644
 --- a/src/dxvk/dxvk_context.cpp
 +++ b/src/dxvk/dxvk_context.cpp
 @@ -7,6 +7,7 @@
@@ -51,13 +49,15 @@ index 66b2c539e0d1662ee0562a1fe7210b6787038f83..a58b762370e6a237fe036200e117a882
  
  namespace dxvk {
    
-@@ -6564,7 +6565,51 @@ namespace dxvk {
+@@ -6564,7 +6565,58 @@ namespace dxvk {
  
        m_cmd->beginSecondaryCommandBuffer(inheritance);
      } else {
 -      // Begin rendering right away on regular GPUs
 +      // Gaze-driven VRS: attach a shading rate image to eye passes
-+      bool gazeVrsActive = false;
++      m_gazeVrsPass = DxvkGazeVrs::PrepareResult::Skip;
++      m_gazeVrsUseDrawFilter = false;
++      m_gazeVrsDrawFull = false;
 +
 +      if (dxvkGazeVrsEnabled(m_device.ptr())) {
 +        if (!m_gazeVrs)
@@ -68,13 +68,15 @@ index 66b2c539e0d1662ee0562a1fe7210b6787038f83..a58b762370e6a237fe036200e117a882
 +
 +        const auto& gazeColor = framebufferInfo.getColorTarget(0u);
 +
-+        gazeVrsActive = m_gazeVrs->prepare(m_cmd.ptr(),
++        m_gazeVrsPass = m_gazeVrs->prepare(m_cmd.ptr(),
 +          VkExtent2D { fbSize.width, fbSize.height }, fbSize.layers,
 +          gazeColor.view ? gazeColor.view->info().format : VK_FORMAT_UNDEFINED,
 +          gazeColor.view ? gazeColor.view->image()->info().sampleCount : VK_SAMPLE_COUNT_1_BIT,
-+          gazeInfo);
++          framebufferInfo.getDepthTarget().view != nullptr,
++          gazeInfo,
++          m_gazeVrsUseDrawFilter);
 +
-+        if (gazeVrsActive) {
++        if (m_gazeVrsPass == DxvkGazeVrs::PrepareResult::Attach) {
 +          renderingInfo.pNext = &gazeInfo;
 +
 +          static uint32_t gazeVpLogCount = 0u;
@@ -94,17 +96,20 @@ index 66b2c539e0d1662ee0562a1fe7210b6787038f83..a58b762370e6a237fe036200e117a882
 +      }
 +
 +      if (m_gazeVrs) {
++        const bool startFull = (m_gazeVrsPass != DxvkGazeVrs::PrepareResult::Attach) || m_gazeVrsUseDrawFilter;
 +        VkExtent2D fragmentSize = { 1u, 1u };
 +        VkFragmentShadingRateCombinerOpKHR combiner[2] = {
 +          VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
-+          VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR };
++          startFull ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR
++                    : VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR };
 +        m_cmd->cmdSetFragmentShadingRate(&fragmentSize, combiner);
++        m_gazeVrsDrawFull = startFull;
 +      }
 +
        m_cmd->cmdBeginRendering(DxvkCmdBuffer::ExecBuffer, &renderingInfo);
      }
  
-@@ -6614,6 +6659,38 @@ namespace dxvk {
+@@ -6614,9 +6666,45 @@ namespace dxvk {
        m_cmd->cmdExecuteCommands(1, &cmdBuffer);
      }
  
@@ -143,8 +148,61 @@ index 66b2c539e0d1662ee0562a1fe7210b6787038f83..a58b762370e6a237fe036200e117a882
      // End actual rendering command
      m_cmd->cmdEndRendering(DxvkCmdBuffer::ExecBuffer);
  
++    m_gazeVrsPass = DxvkGazeVrs::PrepareResult::Skip;
++    m_gazeVrsUseDrawFilter = false;
++    m_gazeVrsDrawFull = false;
++
+     // Emit render target barriers
+     releaseRenderTargets();
+   }
+@@ -8177,6 +8265,35 @@ namespace dxvk {
+   }
+ 
+ 
++  void DxvkContext::updateGazeVrsDrawRate() {
++    if (!m_gazeVrs)
++      return;
++
++    const bool attached = m_gazeVrsPass == DxvkGazeVrs::PrepareResult::Attach;
++    const bool depthTest = m_state.dyn.depthStencilState.depthTest();
++    const bool depthWrite = m_state.dyn.depthStencilState.depthWrite();
++    const bool stereoDraw = m_gazeVrs->evaluateDraw(
++      m_state.vp.viewports.data(), m_state.vp.viewportCount,
++      depthTest, depthWrite, attached);
++
++    if (!attached)
++      return;
++
++    const bool wantFull = !stereoDraw;
++    if (wantFull == m_gazeVrsDrawFull)
++      return;
++
++    // KEEP uses the 1x1 pipeline rate; REPLACE applies the gaze attachment.
++    VkExtent2D fragmentSize = { 1u, 1u };
++    VkFragmentShadingRateCombinerOpKHR combiner[2] = {
++      VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR,
++      wantFull ? VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR
++               : VK_FRAGMENT_SHADING_RATE_COMBINER_OP_REPLACE_KHR };
++    m_cmd->cmdSetFragmentShadingRate(&fragmentSize, combiner);
++    m_gazeVrsDrawFull = wantFull;
++  }
++
++
+   template<VkPipelineBindPoint BindPoint>
+   void DxvkContext::updatePushData() {
+     m_flags.clr(DxvkContextFlag::DirtyPushData);
+@@ -8443,6 +8560,9 @@ namespace dxvk {
+       this->updateTransformFeedbackState();
+     
+     this->updateDynamicState();
++
++    if (unlikely(m_gazeVrsPass != DxvkGazeVrs::PrepareResult::Skip && m_gazeVrsUseDrawFilter))
++      this->updateGazeVrsDrawRate();
+     
+     if (m_flags.all(DxvkContextFlag::GpHasPushData, DxvkContextFlag::DirtyPushData))
+       this->updatePushData<VK_PIPELINE_BIND_POINT_GRAPHICS>();
 diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
-index 1e9780f24704ddd9f627a7b1c12f88a8c09c2499..05b8250cb1dc8d1d13ee556e536e76ecaeaef0fb 100644
+index 1e9780f24704ddd9f627a7b1c12f88a8c09c2499..7f412eb29e3a7b3935a2ed0fcba9d085b868aa86 100644
 --- a/src/dxvk/dxvk_context.h
 +++ b/src/dxvk/dxvk_context.h
 @@ -6,6 +6,7 @@
@@ -155,14 +213,25 @@ index 1e9780f24704ddd9f627a7b1c12f88a8c09c2499..05b8250cb1dc8d1d13ee556e536e76ec
  #include "dxvk_implicit_resolve.h"
  #include "dxvk_latency.h"
  #include "dxvk_objects.h"
-@@ -1334,6 +1335,7 @@ namespace dxvk {
+@@ -1334,6 +1335,10 @@ namespace dxvk {
    private:
      
      Rc<DxvkDevice>          m_device;
 +    std::unique_ptr<DxvkGazeVrs> m_gazeVrs;
++    DxvkGazeVrs::PrepareResult m_gazeVrsPass = DxvkGazeVrs::PrepareResult::Skip;
++    bool                    m_gazeVrsUseDrawFilter = false;
++    bool                    m_gazeVrsDrawFull = false;
      DxvkObjects*            m_common;
  
      uint64_t                m_frameCount = 0u;
+@@ -1784,6 +1789,7 @@ namespace dxvk {
+     void updateTransformFeedbackState();
+ 
+     void updateDynamicState();
++    void updateGazeVrsDrawRate();
+ 
+     template<VkPipelineBindPoint BindPoint>
+     void updatePushData();
 diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
 index 7e3d16a7861871449cdf8b1105eb9cfc59274c61..a33d6b430600bb06d0c995ab67ee542d06374567 100644
 --- a/src/dxvk/dxvk_device_info.cpp

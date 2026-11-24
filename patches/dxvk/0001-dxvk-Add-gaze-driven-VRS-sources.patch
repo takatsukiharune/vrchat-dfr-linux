@@ -1,25 +1,26 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: vrchat-dfr-linux contributors
  <vrchat-dfr-linux@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 00:00:00 +0000
+Date: Tue, 24 Nov 2026 20:40:23 +0900
 Subject: [dxvk] Add gaze-driven VRS sources
 
-Gaze shared-memory reader, settings, tile-map worker and the Vulkan
-shading-rate attachment. Nothing references these files yet.
+Gaze shared-memory reader, settings, draw-observed stereo pass filter, tile-map worker, and Vulkan shading-rate attachment. Nothing references these files yet.
 ---
- src/dxvk/dxvk_gaze_buffer.h   |  42 ++
- src/dxvk/dxvk_gaze_config.h   | 358 +++++++++++++
- src/dxvk/dxvk_gaze_dot.h      |  31 ++
- src/dxvk/dxvk_gaze_map.h      | 239 +++++++++
- src/dxvk/dxvk_gaze_shm.h      |  76 +++
- src/dxvk/dxvk_gaze_source.cpp | 308 ++++++++++++
- src/dxvk/dxvk_gaze_source.h   |  74 +++
- src/dxvk/dxvk_gaze_vrs.cpp    | 921 ++++++++++++++++++++++++++++++++++
- src/dxvk/dxvk_gaze_vrs.h      | 126 +++++
- 9 files changed, 2175 insertions(+)
+ src/dxvk/dxvk_gaze_buffer.h   |   42 ++
+ src/dxvk/dxvk_gaze_config.h   |  364 ++++++++++++
+ src/dxvk/dxvk_gaze_dot.h      |   31 +
+ src/dxvk/dxvk_gaze_filter.h   |  210 +++++++
+ src/dxvk/dxvk_gaze_map.h      |  239 ++++++++
+ src/dxvk/dxvk_gaze_shm.h      |   76 +++
+ src/dxvk/dxvk_gaze_source.cpp |  308 ++++++++++
+ src/dxvk/dxvk_gaze_source.h   |   74 +++
+ src/dxvk/dxvk_gaze_vrs.cpp    | 1005 +++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_gaze_vrs.h      |  143 +++++
+ 10 files changed, 2492 insertions(+)
  create mode 100644 src/dxvk/dxvk_gaze_buffer.h
  create mode 100644 src/dxvk/dxvk_gaze_config.h
  create mode 100644 src/dxvk/dxvk_gaze_dot.h
+ create mode 100644 src/dxvk/dxvk_gaze_filter.h
  create mode 100644 src/dxvk/dxvk_gaze_map.h
  create mode 100644 src/dxvk/dxvk_gaze_shm.h
  create mode 100644 src/dxvk/dxvk_gaze_source.cpp
@@ -77,10 +78,10 @@ index 0000000000000000000000000000000000000000..f5407168362718cbbd89e3d181121cba
 +}
 diff --git a/src/dxvk/dxvk_gaze_config.h b/src/dxvk/dxvk_gaze_config.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb862f12b59f
+index 0000000000000000000000000000000000000000..c17d6798d9cd2934593a8b1efd7a8c766d114963
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_config.h
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,364 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -112,6 +113,8 @@ index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb86
 +    uint32_t minSize = 700u;
 +    uint32_t onlySamples = 0u, onlyFormat = 0u;
 +    uint32_t forceW = 0u, forceH = 0u;
++    bool needDepth = true;
++    bool drawFilter = true;
 +    bool debug = false, dot = false;
 +    int32_t dotRadius = 24;
 +    bool flipY = false, swapEyes = false;
@@ -227,6 +230,8 @@ index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb86
 +        else if (std::sscanf(value.c_str(), "%ux%u%c", &w, &h, &tail) == 2 && w && h) { forceW = w; forceH = h; }
 +        else return false;
 +      }
++      else if (key == "need_depth") { if (!parseBool(value, b)) return false; needDepth = b; }
++      else if (key == "draw_filter") { if (!parseBool(value, b)) return false; drawFilter = b; }
 +      else if (key == "debug") { if (!parseBool(value, b)) return false; debug = b; }
 +      else if (key == "dot") { if (!parseBool(value, b)) return false; dot = b; }
 +      else if (key == "dot_radius") { if (!number(1.0, 512.0)) return false; dotRadius = int32_t(n); }
@@ -277,7 +282,8 @@ index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb86
 +          && fullArea == o.fullArea && midArea == o.midArea
 +          && coarse == o.coarse && autoCoarse == o.autoCoarse && mid == o.mid && minSize == o.minSize
 +          && onlySamples == o.onlySamples && onlyFormat == o.onlyFormat
-+          && forceW == o.forceW && forceH == o.forceH && debug == o.debug && dot == o.dot
++          && forceW == o.forceW && forceH == o.forceH
++          && needDepth == o.needDepth && drawFilter == o.drawFilter && debug == o.debug && dot == o.dot
 +          && dotRadius == o.dotRadius && flipY == o.flipY && swapEyes == o.swapEyes
 +          && forceFlipX[0] == o.forceFlipX[0] && forceFlipX[1] == o.forceFlipX[1]
 +          && forceFlipY[0] == o.forceFlipY[0] && forceFlipY[1] == o.forceFlipY[1]
@@ -292,10 +298,11 @@ index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb86
 +      char text[512];
 +      std::snprintf(text, sizeof(text),
 +          "enabled=%d full_area=%g mid_area=%g r1=%g r2=%g coarse=%s%u mid=%u fmt=%u samples=%u"
-+          " minsize=%u size=%ux%u flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
++          " minsize=%u size=%ux%u need_depth=%d draw_filter=%d flip_y=%d swap_eyes=%d gain_y=%g fake=%s hold_ms=%u"
 +          " fallback=%s dot=%d debug=%d",
 +          int(enabled), double(fullArea), double(midArea), double(r1), double(r2),
 +          autoCoarse ? "auto/" : "", coarse, mid, onlyFormat, onlySamples, minSize, forceW, forceH,
++          int(needDepth), int(drawFilter),
 +          int(flipY), int(swapEyes), double(gainY), fakes[uint32_t(fake)], holdMs,
 +          fallback == GazeFallback::Center ? "center" : "off", int(dot), int(debug));
 +      return text;
@@ -316,7 +323,7 @@ index 0000000000000000000000000000000000000000..9aa63fed05d76c5a742cf9231624fb86
 +  {
 +    static const std::vector<std::string> keys = {
 +        "R1", "R2", "FULL_AREA", "MID_AREA", "MAXRATE", "COARSE", "MID", "MINSIZE", "SAMPLES", "FMT",
-+        "SIZE", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
++        "SIZE", "NEED_DEPTH", "DRAW_FILTER", "DEBUG", "DOT", "DOT_RADIUS", "FLIP_Y", "SWAP_EYES", "GAIN_Y", "FIXED_Y",
 +        "FLIPX_L", "FLIPX_R", "FLIPY_L", "FLIPY_R", "FAKE", "HOLD_MS", "FALLBACK"};
 +    return keys;
 +  }
@@ -477,6 +484,222 @@ index 0000000000000000000000000000000000000000..71ccea173ad3aeef185dd74e3a582e53
 +
 +}
 \ No newline at end of file
+diff --git a/src/dxvk/dxvk_gaze_filter.h b/src/dxvk/dxvk_gaze_filter.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d5088e70b71e3deb75d9eaf1f0e93dc2ac3139f
+--- /dev/null
++++ b/src/dxvk/dxvk_gaze_filter.h
+@@ -0,0 +1,210 @@
++#pragma once
++
++#include <array>
++#include <chrono>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++
++// Draw-observed stereo pass filter with promotion hysteresis and idle expiry.
++// This header has no Vulkan or DXVK dependencies so native unit tests can build it directly.
++namespace dxvk
++{
++  struct GazePassKey
++  {
++    uint32_t width = 0u;
++    uint32_t height = 0u;
++    uint32_t layers = 0u;
++    uint32_t format = 0u;
++    uint32_t samples = 0u;
++    bool hasDepth = false;
++
++    bool operator==(const GazePassKey &o) const
++    {
++      return width == o.width && height == o.height && layers == o.layers
++          && format == o.format && samples == o.samples && hasDepth == o.hasDepth;
++    }
++    bool operator!=(const GazePassKey &o) const { return !(*this == o); }
++  };
++
++  struct GazeViewportRect
++  {
++    float x = 0.0f;
++    float y = 0.0f;
++    float width = 0.0f;
++    float height = 0.0f;
++  };
++
++  // Returns true when viewport 0 matches a stereo eye region.
++  // Single-layer side-by-side targets use half the framebuffer width on the left or right half.
++  // Two-layer array targets use the full framebuffer width starting at x equal to 0.
++  inline bool isStereoDrawViewport(
++      uint32_t fbWidth,
++      uint32_t fbHeight,
++      uint32_t layers,
++      const GazeViewportRect *viewports,
++      uint32_t viewportCount)
++  {
++    if (!viewports || viewportCount == 0u || fbWidth < 2u || fbHeight == 0u)
++      return false;
++
++    auto closeTo = [](float a, float b) { return std::fabs(a - b) <= 2.0f; };
++    const GazeViewportRect &vp = viewports[0];
++    const float vh = std::fabs(vp.height);
++    if (vh < float(fbHeight) * 0.75f || vh > float(fbHeight) + 2.0f)
++      return false;
++
++    if (layers == 1u)
++    {
++      const float halfW = float(fbWidth) * 0.5f;
++      return closeTo(vp.width, halfW) && (closeTo(vp.x, 0.0f) || closeTo(vp.x, halfW));
++    }
++
++    if (layers == 2u)
++      return closeTo(vp.width, float(fbWidth)) && closeTo(vp.x, 0.0f);
++
++    return false;
++  }
++
++  // Decides whether a draw call qualifies as stereo scene rendering.
++  // DXVK uses this result to promote pass shapes and to switch the dynamic shading-rate combiner.
++  inline bool isStereoDraw(
++      uint32_t fbWidth,
++      uint32_t fbHeight,
++      uint32_t layers,
++      const GazeViewportRect *viewports,
++      uint32_t viewportCount,
++      bool depthTest,
++      bool depthWrite,
++      bool needDepth)
++  {
++    if (needDepth && !(depthTest || depthWrite))
++      return false;
++    return isStereoDrawViewport(fbWidth, fbHeight, layers, viewports, viewportCount);
++  }
++
++  // Tracks pass shapes observed on the render thread.
++  // A shape moves from Unseen to Observing on the first matching draw.
++  // A shape moves from Observing to Confirmed after PromotePasses matching passes.
++  // Any shape returns to Unseen after ExpireDuration passes without a matching draw.
++  class GazePassTracker
++  {
++  public:
++    using Clock = std::chrono::steady_clock;
++    using TimePoint = Clock::time_point;
++
++    static constexpr size_t Capacity = 32u;
++    static constexpr uint32_t PromotePasses = 3u;
++    static constexpr std::chrono::milliseconds ExpireDuration = std::chrono::milliseconds(2000);
++
++    enum class Status : uint8_t { Unseen, Observing, Confirmed };
++
++    Status status(const GazePassKey &key, TimePoint now)
++    {
++      for (auto &entry : m_entries)
++      {
++        if (!entry.inUse || entry.key != key)
++          continue;
++        if (expired(entry, now))
++        {
++          entry = {};
++          return Status::Unseen;
++        }
++        return entry.confirmed ? Status::Confirmed : Status::Observing;
++      }
++      return Status::Unseen;
++    }
++
++    bool isConfirmed(const GazePassKey &key, TimePoint now)
++    {
++      return status(key, now) == Status::Confirmed;
++    }
++
++    Status observeMatch(const GazePassKey &key, TimePoint now)
++    {
++      Entry *slot = nullptr;
++      for (auto &entry : m_entries)
++      {
++        if (entry.inUse && entry.key == key)
++        {
++          slot = &entry;
++          break;
++        }
++      }
++
++      if (!slot)
++      {
++        // Prefer an unused or expired slot, then oldest unconfirmed, then oldest confirmed.
++        for (auto &entry : m_entries)
++        {
++          if (!entry.inUse || expired(entry, now))
++          {
++            entry = {};
++            slot = &entry;
++            break;
++          }
++        }
++      }
++
++      if (!slot)
++      {
++        slot = &m_entries[0];
++        for (size_t i = 1u; i < Capacity; ++i)
++        {
++          const Entry &cand = m_entries[i];
++          if (slot->confirmed != cand.confirmed)
++          {
++            if (slot->confirmed && !cand.confirmed)
++              slot = &m_entries[i];
++          }
++          else if (cand.lastSerial < slot->lastSerial)
++          {
++            slot = &m_entries[i];
++          }
++        }
++        *slot = {};
++      }
++      else if (slot->inUse && expired(*slot, now))
++      {
++        *slot = {};
++      }
++
++      slot->inUse = true;
++      slot->key = key;
++      slot->lastMatch = now;
++      slot->lastSerial = ++m_serial;
++      if (slot->matchPasses < PromotePasses)
++        slot->matchPasses++;
++      if (slot->matchPasses >= PromotePasses)
++        slot->confirmed = true;
++
++      return slot->confirmed ? Status::Confirmed : Status::Observing;
++    }
++
++    void clear()
++    {
++      for (auto &entry : m_entries)
++        entry = {};
++      m_serial = 0u;
++    }
++
++  private:
++    struct Entry
++    {
++      bool inUse = false;
++      bool confirmed = false;
++      GazePassKey key;
++      uint32_t matchPasses = 0u;
++      uint64_t lastSerial = 0u;
++      TimePoint lastMatch = {};
++    };
++
++    static bool expired(const Entry &entry, TimePoint now)
++    {
++      return now >= entry.lastMatch && (now - entry.lastMatch) >= ExpireDuration;
++    }
++
++    std::array<Entry, Capacity> m_entries;
++    uint64_t m_serial = 0u;
++  };
++}
 diff --git a/src/dxvk/dxvk_gaze_map.h b/src/dxvk/dxvk_gaze_map.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..69e55c3b2585858db87eeefa4e9ccb9ce40cf764
@@ -1200,10 +1423,10 @@ index 0000000000000000000000000000000000000000..318804187406c920884c2b0c24b8806b
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c01629fd29
+index 0000000000000000000000000000000000000000..e76a41f37b4c38b88c5a8978c709dd4b62aeac74
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
-@@ -0,0 +1,921 @@
+@@ -0,0 +1,1005 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <cstdio>
@@ -1266,6 +1489,7 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +
 +    // Written by the render thread, reported in the status file.
 +    std::atomic<uint32_t> candidates = {0u}, attached = {0u}, uploads = {0u};
++    std::atomic<uint32_t> foveatedDraws = {0u}, fullRateDraws = {0u};
 +    dxvk::mutex statusMutex;
 +    PassInfo windowPass = {};
 +    PassInfo lastPass = {};
@@ -1419,6 +1643,8 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +      const uint32_t candidatesNow = candidates.exchange(0u, std::memory_order_relaxed);
 +      const uint32_t attachedNow = attached.exchange(0u, std::memory_order_relaxed);
 +      const uint32_t uploadsNow = uploads.exchange(0u, std::memory_order_relaxed);
++      const uint32_t foveatedDrawsNow = foveatedDraws.exchange(0u, std::memory_order_relaxed);
++      const uint32_t fullRateDrawsNow = fullRateDraws.exchange(0u, std::memory_order_relaxed);
 +
 +      PassInfo pass = {};
 +      {
@@ -1434,10 +1660,12 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +      char text[512];
 +      const int length = std::snprintf(text, sizeof(text),
 +          "tick=%u owner=%s\nenabled=%d\ngaze=%s\nsource=%s\ncandidate_passes_per_s=%u\n"
-+          "foveated_passes_per_s=%u\nmap_uploads_per_s=%u\npass=%ux%u layers=%u fmt=%u samples=%u\n"
++          "foveated_passes_per_s=%u\nmap_uploads_per_s=%u\nfoveated_draws_per_s=%u\n"
++          "fullrate_draws_per_s=%u\npass=%ux%u layers=%u fmt=%u samples=%u\n"
 +          "coarse=%ux%u\nmid=%ux%u\ntexel=%ux%u\n",
 +          ++statusTick, ownerTag.c_str(), int(file.config().enabled), states[uint32_t(source.state())],
 +          source.sourceOpen() ? "open" : "closed", candidatesNow, attachedNow, uploadsNow,
++          foveatedDrawsNow, fullRateDrawsNow,
 +          pass.width, pass.height, pass.layers, pass.format, pass.samples,
 +          1u << (pass.coarse >> 2u), 1u << (pass.coarse & 3u),
 +          1u << (pass.mid >> 2u), 1u << (pass.mid & 3u), texel.width, texel.height);
@@ -1722,7 +1950,10 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +    std::unique_lock<dxvk::mutex> lock(m_mapWorker->configMutex, std::try_to_lock);
 +    if (!lock.owns_lock())
 +      return;
-+    m_cfg = m_mapWorker->config;
++    const GazeConfig &next = m_mapWorker->config;
++    if (next.needDepth != m_cfg.needDepth || next.drawFilter != m_cfg.drawFilter)
++      m_passTracker.clear();
++    m_cfg = next;
 +    m_cfgGeneration = generation;
 +  }
 +
@@ -1808,13 +2039,15 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +    return code;
 +  }
 +
-+  bool DxvkGazeVrs::prepare(
++  DxvkGazeVrs::PrepareResult DxvkGazeVrs::prepare(
 +      DxvkCommandList *cmd,
 +      VkExtent2D extent,
 +      uint32_t layers,
 +      VkFormat colorFormat,
 +      VkSampleCountFlagBits samples,
-+      VkRenderingFragmentShadingRateAttachmentInfoKHR &info)
++      bool hasDepth,
++      VkRenderingFragmentShadingRateAttachmentInfoKHR &info,
++      bool &useDrawFilter)
 +  {
 +    // Supported eye image layouts:
 +    //  - array: 2 layers, one eye per layer
@@ -1824,13 +2057,23 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +
 +    refreshConfig();
 +    const GazeConfig &cfg = m_cfg;
++    useDrawFilter = cfg.drawFilter;
 +
 +    if (m_ok)
 +    {
 +      if (cfg.forceW)
 +      {
-+        candidate = extent.width == cfg.forceW && extent.height == cfg.forceH && layers <= MaxLayers;
-+        sbs = candidate && layers == 1u && extent.width * 10u >= extent.height * 18u;
++        candidate = extent.width == cfg.forceW && extent.height == cfg.forceH
++            && layers >= 1u && layers <= MaxLayers;
++        sbs = candidate && layers == 1u;
++      }
++      else if (cfg.drawFilter)
++      {
++        if (layers == MaxLayers || layers == 1u)
++        {
++          candidate = extent.width >= cfg.minSize && extent.height >= cfg.minSize;
++          sbs = candidate && layers == 1u;
++        }
 +      }
 +      else if (layers == MaxLayers)
 +      {
@@ -1848,6 +2091,9 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +      candidate = false;
 +
 +    // Optional pass filters, to pick the scene pass out of several same-sized passes
++    if (candidate && cfg.needDepth && !hasDepth)
++      candidate = false;
++
 +    if (candidate && cfg.onlySamples && uint32_t(samples) != cfg.onlySamples)
 +      candidate = false;
 +
@@ -1858,20 +2104,21 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +
 +    if (cfg.debug)
 +    {
-+      m_shapes[{extent.width, extent.height, layers, uint32_t(colorFormat), uint32_t(samples)}]++;
++      m_shapes[{extent.width, extent.height, layers, uint32_t(colorFormat), uint32_t(samples), uint32_t(hasDepth)}]++;
 +
 +      if (now >= m_nextSummary)
 +      {
 +        if (m_nextSummary.time_since_epoch().count() != 0)
 +        {
-+          Logger::info("GazeVRS: --- passes in last 5s: WxH layers fmt samples count ---");
++          Logger::info("GazeVRS: --- passes in last 5s: WxH layers fmt samples depth count ---");
 +          for (const auto &e : m_shapes)
 +          {
 +            if (e.second < 10u)
 +              continue;
 +            Logger::info(str::format("GazeVRS:   ", e.first[0], "x", e.first[1],
 +                                     " layers=", e.first[2], " fmt=", e.first[3],
-+                                     " samples=", e.first[4], " count=", e.second));
++                                     " samples=", e.first[4], " depth=", e.first[5],
++                                     " count=", e.second));
 +          }
 +        }
 +        m_shapes.clear();
@@ -1892,17 +2139,36 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +    // Switched off at run time: pipelines keep their dynamic state, the
 +    // pass simply gets no attachment and shades at full rate.
 +    if (!candidate || !cfg.enabled)
-+      return false;
-+
-+    m_mapWorker->candidates.fetch_add(1u, std::memory_order_relaxed);
-+    const uint32_t coarse = resolveCoarse(samples);
-+    const uint32_t mid = resolveRate(gazeMidRate(m_cfg.mid, coarse), samples);
++      return PrepareResult::Skip;
 +
 +    const uint32_t tilesX = (extent.width + m_texel.width - 1u) / m_texel.width;
 +    const uint32_t tilesY = (extent.height + m_texel.height - 1u) / m_texel.height;
 +
 +    if (tilesX > m_maxTiles.width || tilesY > m_maxTiles.height)
-+      return false;
++    {
++      if (!m_loggedTileLimit)
++      {
++        Logger::warn(str::format("GazeVRS: pass ", extent.width, "x", extent.height,
++            " exceeds shading rate attachment limit (", m_maxTiles.width * m_texel.width,
++            "x", m_maxTiles.height * m_texel.height, "), rendering at full rate"));
++        m_loggedTileLimit = true;
++      }
++      return PrepareResult::Skip;
++    }
++
++    if (cfg.drawFilter)
++    {
++      m_activePassKey = {
++          extent.width, extent.height, layers, uint32_t(colorFormat), uint32_t(samples), hasDepth};
++      m_activePassMatched = false;
++
++      if (!m_passTracker.isConfirmed(m_activePassKey, now))
++        return PrepareResult::Observe;
++    }
++
++    m_mapWorker->candidates.fetch_add(1u, std::memory_order_relaxed);
++    const uint32_t coarse = resolveCoarse(samples);
++    const uint32_t mid = resolveRate(gazeMidRate(m_cfg.mid, coarse), samples);
 +
 +    const float eyeW = sbs ? float(extent.width) * 0.5f : float(extent.width);
 +    // The R8_UINT attachment depends only on dimensions, layers and resolved
@@ -1951,7 +2217,7 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +        Logger::err("GazeVRS: map worker failed; disabling VRS");
 +        m_loggedWorkerFailure = true;
 +      }
-+      return false;
++      return PrepareResult::Skip;
 +    }
 +    m_mapWorker->maps.exchange(request, true, target.cpuMap, targetIndex);
 +    const int32_t back = target.buffers.writable(completed);
@@ -2048,7 +2314,7 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +        || target.slots[target.buffers.active]->request.shape != shape
 +        || target.slots[target.buffers.active]->request.coarse != coarse
 +        || target.slots[target.buffers.active]->request.mid != mid)
-+      return false;
++      return cfg.drawFilter ? PrepareResult::Observe : PrepareResult::Skip;
 +
 +    auto &front = target.slots[target.buffers.active];
 +    cmd->track(front);
@@ -2121,20 +2387,62 @@ index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c0
 +    info.imageView = front->view;
 +    info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 +    info.shadingRateAttachmentTexelSize = m_texel;
-+    return true;
++    return PrepareResult::Attach;
++  }
++
++  bool DxvkGazeVrs::evaluateDraw(
++      const VkViewport *viewports,
++      uint32_t viewportCount,
++      bool depthTest,
++      bool depthWrite,
++      bool attached)
++  {
++    GazeViewportRect vp = {};
++    if (viewports && viewportCount > 0u)
++    {
++      vp.x = viewports[0].x;
++      vp.y = viewports[0].y;
++      vp.width = viewports[0].width;
++      vp.height = viewports[0].height;
++    }
++
++    const bool matched = isStereoDraw(
++        m_activePassKey.width, m_activePassKey.height, m_activePassKey.layers,
++        &vp, viewportCount > 0u ? 1u : 0u, depthTest, depthWrite, m_cfg.needDepth);
++
++    if (matched && !m_activePassMatched)
++    {
++      m_activePassMatched = true;
++      const auto now = std::chrono::steady_clock::now();
++      const auto prev = m_passTracker.status(m_activePassKey, now);
++      const auto next = m_passTracker.observeMatch(m_activePassKey, now);
++      if (prev != GazePassTracker::Status::Confirmed && next == GazePassTracker::Status::Confirmed)
++      {
++        Logger::info(str::format("GazeVRS: promoted stereo pass ",
++            m_activePassKey.width, "x", m_activePassKey.height,
++            " layers=", m_activePassKey.layers, " fmt=", m_activePassKey.format,
++            " samples=", m_activePassKey.samples, " depth=", int(m_activePassKey.hasDepth)));
++      }
++    }
++
++    if (attached && m_mapWorker)
++      (matched ? m_mapWorker->foveatedDraws : m_mapWorker->fullRateDraws).fetch_add(1u, std::memory_order_relaxed);
++
++    return matched;
 +  }
 +
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.h b/src/dxvk/dxvk_gaze_vrs.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b283cb1dc861b1e5d0d7ea475e6ec8477719c19
+index 0000000000000000000000000000000000000000..0d08d8193728530fcf9365f7d33b93899d9ba05f
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.h
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,143 @@
 +#pragma once
 +
 +#include "dxvk_gaze_buffer.h"
 +#include "dxvk_gaze_config.h"
++#include "dxvk_gaze_filter.h"
 +#include "dxvk_gaze_map.h"
 +
 +#include <array>
@@ -2157,16 +2465,27 @@ index 0000000000000000000000000000000000000000..5b283cb1dc861b1e5d0d7ea475e6ec84
 +  {
 +
 +  public:
++    enum class PrepareResult : uint8_t { Skip, Observe, Attach };
++
 +    explicit DxvkGazeVrs(DxvkDevice *device);
 +    ~DxvkGazeVrs();
 +
-+    bool prepare(
++    PrepareResult prepare(
 +        DxvkCommandList *cmd,
 +        VkExtent2D extent,
 +        uint32_t layers,
 +        VkFormat colorFormat,
 +        VkSampleCountFlagBits samples,
-+        VkRenderingFragmentShadingRateAttachmentInfoKHR &info);
++        bool hasDepth,
++        VkRenderingFragmentShadingRateAttachmentInfoKHR &info,
++        bool &useDrawFilter);
++
++    bool evaluateDraw(
++        const VkViewport *viewports,
++        uint32_t viewportCount,
++        bool depthTest,
++        bool depthWrite,
++        bool attached);
 +
 +  private:
 +    static constexpr uint32_t MaxLayers = 2u;
@@ -2228,12 +2547,17 @@ index 0000000000000000000000000000000000000000..5b283cb1dc861b1e5d0d7ea475e6ec84
 +    // shading-rate attachments, in which case only SBS passes are handled.
 +    uint32_t m_layers = MaxLayers;
 +    bool m_loggedLayered = false;
++    bool m_loggedTileLimit = false;
 +
 +    // Render-thread copy of the live configuration, refreshed without
 +    // blocking whenever the worker publishes a new generation.
 +    GazeConfig m_cfg;
 +    uint32_t m_cfgGeneration = 0u;
 +    void refreshConfig();
++
++    GazePassTracker m_passTracker;
++    GazePassKey m_activePassKey = {};
++    bool m_activePassMatched = false;
 +
 +    // Shading rates the device supports, per sample count.
 +    struct RateSet
@@ -2248,7 +2572,7 @@ index 0000000000000000000000000000000000000000..5b283cb1dc861b1e5d0d7ea475e6ec84
 +    uint32_t resolveRate(uint32_t requested, VkSampleCountFlagBits samples);
 +    uint32_t resolveCoarse(VkSampleCountFlagBits samples);
 +
-+    std::map<std::array<uint32_t, 5>, uint32_t> m_shapes; // (w, h, layers, fmt, samples) -> pass count
++    std::map<std::array<uint32_t, 6>, uint32_t> m_shapes; // (w, h, layers, fmt, samples, depth) -> pass count
 +    std::chrono::steady_clock::time_point m_nextSummary = {};
 +
 +    bool createResources();

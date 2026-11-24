@@ -21,5 +21,7 @@ hold_ms = 500
 fallback = off
 
 # enabled = 0      # full-rate rendering without restarting the game
+# need_depth = 1   # require a depth attachment and active depth test or write
+# draw_filter = 1  # promote passes from stereo viewports and shade other draws at 1x1
 # dot = 1          # draw the gaze position to check alignment
 # debug = 1        # per-second diagnostics in the DXVK log

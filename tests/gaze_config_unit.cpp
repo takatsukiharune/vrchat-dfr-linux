@@ -52,6 +52,9 @@ int main() {
   assert(c.set("enabled", "off") && !c.enabled && c.set("vrs", "1") && c.enabled);
   assert(c.set("flipx_l", "1") && c.forceFlipX[0] == 1 && c.set("flipx_l", "auto") && c.forceFlipX[0] == -1);
   assert(c.set("fallback", "center") && c.fallback == GazeFallback::Center);
+  assert(c.needDepth && c.drawFilter);
+  assert(c.set("need_depth", "0") && !c.needDepth && c.set("draw_filter", "off") && !c.drawFilter);
+  assert(c.set("need_depth", "1") && c.needDepth && c.set("draw_filter", "on") && c.drawFilter);
   assert(c.set("size", "0") && c.forceW == 0 && c.set("fake", "none") && c.fake == GazeFake::None);
   assert(c.set("file", "anything") && c.set("config", "anything"));
 
