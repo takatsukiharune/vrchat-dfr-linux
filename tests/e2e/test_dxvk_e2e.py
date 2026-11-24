@@ -224,6 +224,60 @@ def run_main(args, work, samples, validate):
         s.stop()
 
 
+def run_multipass(args, work, validate):
+    """Three candidate pass shapes per frame alongside an idle second D3D11 device.
+
+    Every candidate pass must keep foveating, and the status file must stay
+    non-empty and non-zero across multiple status ticks.
+    """
+    s = Scenario(args, work, 4, validate)
+    L, R = (0.40, 0.45), (0.60, 0.55)
+    try:
+        s.write_config(full_area=5, mid_area=15, coarse="auto", hold_ms=500)
+        s.start_writer(*L, *R)
+        # Omit samples and size so all three RGBA16F passes match.
+        s.start_probe(
+            dict(DXVK_GAZE_VRS="1", DXVK_GAZE_FMT="97", DXVK_GAZE_FILE=str(s.gaze),
+                 DXVK_GAZE_CONFIG=str(s.config)),
+            mode=("multipass",),
+        )
+        s.wait("4x MSAA pass foveates alongside 1x and smaller passes",
+               foveated(0.05, L, R), 60)
+
+        status_path = s.work / "dfr.conf.status"
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if status_path.exists():
+                st = dict(line.split("=", 1) for line in status_path.read_text().splitlines() if "=" in line)
+                if st.get("gaze") == "live" and int(st.get("foveated_passes_per_s", 0)) > 0:
+                    break
+            time.sleep(0.1)
+        else:
+            raise AssertionError("status file never reported live foveation in multipass mode")
+
+        # Poll for 3.5 s across multiple 1 s status ticks from both D3D11 devices.
+        deadline, ticks = time.monotonic() + 3.5, set()
+        while time.monotonic() < deadline:
+            text = status_path.read_text()
+            assert text.strip(), "status file was empty during read"
+            st = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+            cand = int(st.get("candidate_passes_per_s", 0))
+            fov = int(st.get("foveated_passes_per_s", 0))
+            assert st.get("gaze") == "live" and st.get("source") == "open", f"status dropped gaze: {st}"
+            assert cand > 0, f"candidate_passes_per_s dropped to 0: {st}"
+            assert fov > 0 and fov * 5 >= cand * 4, f"foveated_passes_per_s dropped ({fov}/{cand}): {st}"
+            assert st.get("pass") == f"{WIDTH}x{HEIGHT} layers=1 fmt=97 samples=4", f"unexpected primary pass: {st}"
+            ticks.add(st.get("tick", ""))
+            state = s.read()
+            if state:
+                assert foveated(0.05, L, R)(state), f"main pass lost foveation: {state}"
+            time.sleep(0.1)
+        assert len(ticks) >= 2, f"status file did not advance across ticks: {ticks}"
+        print(f"  ok: status stayed non-zero across {len(ticks)} ticks with three pass shapes and an idle second device")
+    finally:
+        s.stop()
+
+
 def run_baseline(args, work, validate):
     """Same probe without DXVK_GAZE_VRS: nothing may be shaded coarsely."""
     s = Scenario(args, work, 1, validate)
@@ -306,11 +360,14 @@ def main():
     print("gaze VRS, 4x MSAA:")
     msaa = directory("msaa")
     run_main(args, msaa, 4, validate)
+    print("gaze VRS, multiple passes and second device:")
+    multipass = directory("multipass")
+    run_multipass(args, multipass, validate)
 
     if validate:
-        for work in (baseline, single, msaa):
+        for work in (baseline, single, msaa, multipass):
             assert (work / "validation.log").exists(), "validation layer did not load"
-        new = (vuids(single) | vuids(msaa)) - vuids(baseline)
+        new = (vuids(single) | vuids(msaa) | vuids(multipass)) - vuids(baseline)
         assert not new, f"Vulkan validation errors introduced by gaze VRS: {sorted(new)}"
         print(f"  ok: no Vulkan validation errors beyond the {len(vuids(baseline))} of stock DXVK paths")
     print("DXVK gaze VRS end-to-end checks passed")

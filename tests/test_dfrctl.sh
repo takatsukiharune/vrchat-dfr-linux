@@ -32,8 +32,9 @@ fails "$dfrctl" set hold_ms 400
 [[ "$("$dfrctl" launch-options)" == "DXVK_GAZE_VRS=1 DXVK_GAZE_CONFIG=$DFR_CONFIG %command%" ]]
 "$dfrctl" status | grep -q 'no status file'
 "$dfrctl" status | grep -q 'no gaze file'
-printf 'tick=1\nenabled=1\ngaze=live\n' > "$DFR_CONFIG.status"
+printf 'tick=1 owner=1234.1\nenabled=1\ngaze=live\n' > "$DFR_CONFIG.status"
 "$dfrctl" status | grep -q 'gaze=live'
+! "$dfrctl" status | grep -q 'owner='
 touch -d '1 minute ago' "$DFR_CONFIG.status"
 "$dfrctl" status | grep -q 'not running'
 "$dfrctl" reset >/dev/null && [[ ! -e "$DFR_CONFIG" ]]

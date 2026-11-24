@@ -8,15 +8,15 @@ Gaze shared-memory reader, settings, tile-map worker and the Vulkan
 shading-rate attachment. Nothing references these files yet.
 ---
  src/dxvk/dxvk_gaze_buffer.h   |  42 ++
- src/dxvk/dxvk_gaze_config.h   | 358 +++++++++++++++++
+ src/dxvk/dxvk_gaze_config.h   | 358 +++++++++++++
  src/dxvk/dxvk_gaze_dot.h      |  31 ++
- src/dxvk/dxvk_gaze_map.h      | 192 +++++++++
- src/dxvk/dxvk_gaze_shm.h      |  76 ++++
- src/dxvk/dxvk_gaze_source.cpp | 281 +++++++++++++
- src/dxvk/dxvk_gaze_source.h   |  56 +++
- src/dxvk/dxvk_gaze_vrs.cpp    | 715 ++++++++++++++++++++++++++++++++++
- src/dxvk/dxvk_gaze_vrs.h      | 102 +++++
- 9 files changed, 1853 insertions(+)
+ src/dxvk/dxvk_gaze_map.h      | 239 +++++++++
+ src/dxvk/dxvk_gaze_shm.h      |  76 +++
+ src/dxvk/dxvk_gaze_source.cpp | 308 ++++++++++++
+ src/dxvk/dxvk_gaze_source.h   |  74 +++
+ src/dxvk/dxvk_gaze_vrs.cpp    | 921 ++++++++++++++++++++++++++++++++++
+ src/dxvk/dxvk_gaze_vrs.h      | 126 +++++
+ 9 files changed, 2175 insertions(+)
  create mode 100644 src/dxvk/dxvk_gaze_buffer.h
  create mode 100644 src/dxvk/dxvk_gaze_config.h
  create mode 100644 src/dxvk/dxvk_gaze_dot.h
@@ -479,10 +479,10 @@ index 0000000000000000000000000000000000000000..71ccea173ad3aeef185dd74e3a582e53
 \ No newline at end of file
 diff --git a/src/dxvk/dxvk_gaze_map.h b/src/dxvk/dxvk_gaze_map.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea080bd599
+index 0000000000000000000000000000000000000000..69e55c3b2585858db87eeefa4e9ccb9ce40cf764
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_map.h
-@@ -0,0 +1,192 @@
+@@ -0,0 +1,239 @@
 +#pragma once
 +
 +#include <algorithm>
@@ -496,6 +496,7 @@ index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea
 +#include <memory>
 +#include <mutex>
 +#include <thread>
++#include <type_traits>
 +#include <vector>
 +
 +namespace dxvk
@@ -582,8 +583,11 @@ index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea
 +
 +  // Thread primitives are supplied by DXVK in production and by the native
 +  // test harness in tests. Only this worker allocates/fills CPU tile maps.
++  // Each channel holds one pass shape so distinct passes in the same frame
++  // do not overwrite each other's requests or read each other's maps.
 +  template<typename Thread = std::thread, typename Mutex = std::mutex,
-+           typename Condition = std::condition_variable, typename Generator = GazeMapGenerator>
++           typename Condition = std::condition_variable, typename Generator = GazeMapGenerator,
++           size_t Slots = 1u>
 +  class GazeMapWorker
 +  {
 +  public:
@@ -611,34 +615,48 @@ index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea
 +    bool failed() const { return m_failed.load(std::memory_order_acquire); }
 +
 +    // Never wait on the render thread, even for the mailbox mutex. Requests
-+    // replace the queued request; a running job is allowed to finish so that
-+    // continuous gaze motion cannot starve publication of completed maps.
-+    bool exchange(const GazeMapRequest &request, bool needed, std::unique_ptr<GazeMap> &result)
++    // replace the queued request for their slot; a running job is allowed to
++    // finish so that continuous gaze motion cannot starve publication.
++    bool exchange(const GazeMapRequest &request, bool needed, std::unique_ptr<GazeMap> &result,
++        size_t slot = 0u)
 +    {
++      if (slot >= Slots) return false;
 +      std::unique_lock<Mutex> lock(m_mutex, std::try_to_lock);
 +      if (!lock.owns_lock()) return false;
-+      const bool ready = m_ready;
++      auto &channel = m_channels[slot];
++      const bool ready = channel.ready;
 +      if (ready)
 +      {
-+        result.swap(m_result);
-+        m_ready = false;
++        result.swap(channel.result);
++        channel.ready = false;
 +      }
-+      if (needed && (!m_requested || !request.sameMap(m_request)))
++      if (needed)
 +      {
-+        m_request = request;
-+        m_requested = true;
-+        m_hasJob = true;
-+        m_condition.notify_one();
++        channel.touchSeq++;
++        if (!channel.requested || !request.sameMap(channel.request))
++        {
++          channel.request = request;
++          channel.requested = true;
++          channel.hasJob = true;
++          m_condition.notify_one();
++        }
 +      }
 +      return ready;
 +    }
 +
 +  private:
++    struct Channel
++    {
++      GazeMapRequest request;
++      bool requested = false, hasJob = false, ready = false;
++      uint32_t touchSeq = 0u;
++      std::unique_ptr<GazeMap> result;
++    };
++
 +    Mutex m_mutex;
 +    Condition m_condition;
-+    GazeMapRequest m_request;
-+    bool m_requested = false, m_hasJob = false, m_stopped = false, m_ready = false;
-+    std::unique_ptr<GazeMap> m_result;
++    std::array<Channel, Slots> m_channels;
++    bool m_stopped = false;
 +    std::atomic<bool> m_failed = {false};
 +    std::chrono::milliseconds m_poll;
 +    Generator m_generate;
@@ -646,30 +664,59 @@ index 0000000000000000000000000000000000000000..77d878ed6aa8c06662aab01199ce0bea
 +
 +    void run()
 +    {
-+      std::unique_ptr<GazeMap> building;
++      std::array<std::unique_ptr<GazeMap>, Slots> building;
 +      for (;;)
 +      {
-+        GazeMapRequest request;
++        std::array<GazeMapRequest, Slots> requests;
++        std::array<bool, Slots> runSlot = {};
++        std::array<uint32_t, Slots> touchSeq = {};
 +        {
 +          std::unique_lock<Mutex> lock(m_mutex);
-+          auto wake = [this] { return m_stopped || m_hasJob; };
-+          if (m_requested && m_poll.count())
++          auto wake = [this] {
++            if (m_stopped) return true;
++            for (const auto &ch : m_channels)
++              if (ch.hasJob) return true;
++            return false;
++          };
++          bool anyRequested = false;
++          for (const auto &ch : m_channels)
++            anyRequested = anyRequested || ch.requested;
++          if (anyRequested && m_poll.count())
 +            m_condition.wait_for(lock, m_poll, wake);
 +          else
 +            m_condition.wait(lock, wake);
 +          if (m_stopped) return;
-+          request = m_request;
-+          m_hasJob = false;
-+          // Recycle the previous CPU map returned by the render thread.
-+          if (!building && !m_ready) building.swap(m_result);
++          for (size_t i = 0u; i < Slots; ++i)
++          {
++            auto &ch = m_channels[i];
++            if (!ch.requested) continue;
++            if (!m_poll.count() && !ch.hasJob) continue;
++            runSlot[i] = true;
++            touchSeq[i] = ch.touchSeq;
++            requests[i] = ch.request;
++            ch.hasJob = false;
++            // Recycle the previous CPU map returned by the render thread.
++            if (!building[i] && !ch.ready) building[i].swap(ch.result);
++          }
 +        }
-+        if (!building) building = std::make_unique<GazeMap>();
-+        if (!m_generate(request, *building)) continue;
++        bool firstInBatch = true;
++        for (size_t i = 0u; i < Slots; ++i)
 +        {
-+          std::lock_guard<Mutex> lock(m_mutex);
-+          // Keep the last completed result even when newer gaze is queued.
-+          building.swap(m_result);
-+          m_ready = true;
++          if (!runSlot[i]) continue;
++          if (!building[i]) building[i] = std::make_unique<GazeMap>();
++          bool generated = false;
++          if constexpr (std::is_invocable_v<Generator&, size_t, bool, uint32_t, const GazeMapRequest&, GazeMap&>)
++            generated = m_generate(i, firstInBatch, touchSeq[i], requests[i], *building[i]);
++          else
++            generated = m_generate(requests[i], *building[i]);
++          firstInBatch = false;
++          if (!generated) continue;
++          {
++            std::lock_guard<Mutex> lock(m_mutex);
++            // Keep the last completed result even when newer gaze is queued.
++            building[i].swap(m_channels[i].result);
++            m_channels[i].ready = true;
++          }
 +        }
 +      }
 +    }
@@ -759,10 +806,10 @@ index 0000000000000000000000000000000000000000..5154df1919a69cf126a92505ca22aa89
 +} // namespace gaze_bridge
 diff --git a/src/dxvk/dxvk_gaze_source.cpp b/src/dxvk/dxvk_gaze_source.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd2269203e7bbcd
+index 0000000000000000000000000000000000000000..98e6f4eb81ae130f8515d998dcdcceac0a1ada39
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.cpp
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,308 @@
 +#include "dxvk_gaze_source.h"
 +#include "../util/log/log.h"
 +#include "../util/util_env.h"
@@ -879,22 +926,11 @@ index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd22692
 +    return false;
 +  }
 +
-+  bool DxvkGazeSource::generate(const GazeMapRequest &pass, GazeMap &result)
++  bool DxvkGazeSource::sampleBatch(std::chrono::steady_clock::time_point now, Gaze &g)
 +  {
-+    const auto now = std::chrono::steady_clock::now();
-+    const uint32_t width = pass.shape[0], height = pass.shape[1];
-+    const uint32_t texelWidth = pass.texel[0], texelHeight = pass.texel[1];
-+    const bool sbs = pass.shape[2] == 1u;
-+    const uint32_t tilesX = (width + texelWidth - 1u) / texelWidth;
-+    const uint32_t tilesY = (height + texelHeight - 1u) / texelHeight;
-+    Gaze g = {};
-+
++    g = {};
 +    const GazeConfig &cfg = m_config;
 +    const State previous = m_state;
-+
-+    // Nothing to build for the start-up request or while switched off.
-+    if (!width || !height || !cfg.enabled)
-+      return false;
 +
 +    if (cfg.fake != GazeFake::None)
 +    {
@@ -948,11 +984,7 @@ index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd22692
 +        Logger::info("GazeVRS: no valid gaze data, rendering at full rate");
 +      m_haveHeld = false;
 +      m_state = State::None;
-+      if (!m_lastValid) return false;
-+      m_lastValid = false;
-+      result.valid = false;
-+      result.request = pass;
-+      return true;
++      return false;
 +    }
 +
 +    if (previous == State::None && m_state != State::Fake)
@@ -981,6 +1013,48 @@ index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd22692
 +      std::swap(g.flipX[0], g.flipX[1]);
 +      std::swap(g.flipY[0], g.flipY[1]);
 +    }
++
++    return true;
++  }
++
++  bool DxvkGazeSource::generateSlot(size_t slot, const GazeMapRequest &pass, GazeMap &result, bool active)
++  {
++    if (slot >= MaxSlots)
++      return false;
++
++    const uint32_t width = pass.shape[0], height = pass.shape[1];
++    const uint32_t texelWidth = pass.texel[0], texelHeight = pass.texel[1];
++    const bool sbs = pass.shape[2] == 1u;
++    const uint32_t tilesX = (width + texelWidth - 1u) / texelWidth;
++    const uint32_t tilesY = (height + texelHeight - 1u) / texelHeight;
++    const GazeConfig &cfg = m_config;
++
++    // Nothing to build for the start-up request or while switched off.
++    if (!width || !height || !cfg.enabled)
++      return false;
++
++    if (!m_batchSampled)
++    {
++      m_batchNow = std::chrono::steady_clock::now();
++      m_batchSampled = true;
++      m_batchValid = sampleBatch(m_batchNow, m_batchGaze);
++    }
++
++    auto &cache = m_slots[slot];
++    if (!m_batchValid)
++    {
++      if (!cache.lastValid)
++        return false;
++      cache.lastValid = false;
++      result.valid = false;
++      result.request = pass;
++      return true;
++    }
++
++    if (!active)
++      return false;
++
++    const Gaze &g = m_batchGaze;
 +
 +    // Fovea position per eye in framebuffer space (0..1, origin top-left of the eye image).
 +    // WiVRn reports display space and tells us whether the source image is mirrored.
@@ -1012,9 +1086,9 @@ index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd22692
 +        center[0] / int32_t(texelWidth), center[1] / int32_t(texelHeight),
 +        center[2] / int32_t(texelWidth), center[3] / int32_t(texelHeight)};
 +
-+    if (cfg.debug && now >= m_nextGazeLog)
++    if (cfg.debug && m_batchNow >= m_nextGazeLog)
 +    {
-+      m_nextGazeLog = now + std::chrono::seconds(1);
++      m_nextGazeLog = m_batchNow + std::chrono::seconds(1);
 +      Logger::info(str::format("GazeVRS: ", sbs ? "sbs " : "array ", width, "x", height,
 +                               " display L(", g.cx[0], ",", g.cy[0], ") R(", g.cx[1], ",", g.cy[1], ")",
 +                               " source flipX=", g.flipX[0], g.flipX[1], " flipY=", g.flipY[0], g.flipY[1],
@@ -1037,24 +1111,25 @@ index 0000000000000000000000000000000000000000..713a0b4f827b7c95896c27764bd22692
 +    request.center = centerTiles;
 +    request.dotCenter = center;
 +    request.flags = flags;
-+    if (m_lastValid && request.sameMap(m_lastRequest)) return false;
++    if (cache.lastValid && request.sameMap(cache.lastRequest)) return false;
 +    generateGazeMap(request, result);
-+    m_lastRequest = request;
-+    m_lastValid = true;
++    cache.lastRequest = request;
++    cache.lastValid = true;
 +    return true;
 +  }
 +}
 diff --git a/src/dxvk/dxvk_gaze_source.h b/src/dxvk/dxvk_gaze_source.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda6c0fa49c
+index 0000000000000000000000000000000000000000..318804187406c920884c2b0c24b8806be122fe22
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_source.h
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,74 @@
 +#pragma once
 +
 +#include "dxvk_gaze_config.h"
 +#include "dxvk_gaze_map.h"
 +#include "dxvk_gaze_shm.h"
++#include <array>
 +#include <chrono>
 +#include <string>
 +
@@ -1065,6 +1140,8 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +  class DxvkGazeSource
 +  {
 +  public:
++    static constexpr size_t MaxSlots = 8u;
++
 +    // What the last generate() call based its gaze on.
 +    enum class State : uint32_t { None, Live, Held, Fallback, Fake };
 +
@@ -1072,7 +1149,13 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +    ~DxvkGazeSource();
 +    DxvkGazeSource(const DxvkGazeSource &) = delete;
 +    DxvkGazeSource &operator=(const DxvkGazeSource &) = delete;
-+    bool generate(const GazeMapRequest &pass, GazeMap &result);
++    void beginBatch() { m_batchSampled = false; }
++    bool generateSlot(size_t slot, const GazeMapRequest &pass, GazeMap &result, bool active = true);
++    bool generate(const GazeMapRequest &pass, GazeMap &result)
++    {
++      beginBatch();
++      return generateSlot(0u, pass, result, true);
++    }
 +    // Worker thread only, like generate().
 +    void setConfig(const GazeConfig &config) { m_config = config; }
 +    State state() const { return m_state; }
@@ -1085,6 +1168,11 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +      float cx[2] = {}, cy[2] = {};
 +      int32_t flipX[2] = {}, flipY[2] = {};
 +    };
++    struct SlotCache
++    {
++      bool lastValid = false;
++      GazeMapRequest lastRequest;
++    };
 +    void *m_file = nullptr, *m_map = nullptr;
 +    const GazeShm *m_shm = nullptr;
 +    std::chrono::steady_clock::time_point m_nextOpen = {};
@@ -1092,26 +1180,30 @@ index 0000000000000000000000000000000000000000..9bccf78f8e47fedbf717d109574b9eda
 +    GazeConfig m_config;
 +    std::string m_path;
 +    State m_state = State::None;
-+    bool m_loggedOpen = false, m_lastValid = false;
++    bool m_loggedOpen = false;
++    bool m_batchSampled = false, m_batchValid = false;
++    Gaze m_batchGaze;
++    std::chrono::steady_clock::time_point m_batchNow = {};
 +    // Last live sample, reused for hold_ms across blinks and bridge restarts.
 +    Gaze m_heldGaze;
 +    bool m_haveHeld = false;
 +    std::chrono::steady_clock::time_point m_heldTime = {};
-+    GazeMapRequest m_lastRequest;
++    std::array<SlotCache, MaxSlots> m_slots;
 +    float m_winMin[2] = {1.0f, 1.0f}, m_winMax[2] = {0.0f, 0.0f};
 +    float m_winMinX[2] = {1.0f, 1.0f}, m_winMaxX[2] = {0.0f, 0.0f};
 +    std::chrono::steady_clock::time_point m_nextGazeLog = {};
 +    void openSource();
 +    void closeSource();
 +    bool readGaze(Gaze &g);
++    bool sampleBatch(std::chrono::steady_clock::time_point now, Gaze &g);
 +  };
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.cpp b/src/dxvk/dxvk_gaze_vrs.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96504cd27c
+index 0000000000000000000000000000000000000000..b709d3d622dd4d0ed0070d69343ae1c01629fd29
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.cpp
-@@ -0,0 +1,715 @@
+@@ -0,0 +1,921 @@
 +#include <algorithm>
 +#include <atomic>
 +#include <cstdio>
@@ -1127,6 +1219,14 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +#include "../util/log/log.h"
 +#include "../util/util_env.h"
 +#include "../util/util_string.h"
++
++#ifdef _WIN32
++#include "../util/util_win32_compat.h"
++#else
++#include <ctime>
++#include <sys/stat.h>
++#include <unistd.h>
++#endif
 +
 +namespace dxvk
 +{
@@ -1151,6 +1251,14 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +  // header. Destruction joins the worker before closing its source mapping.
 +  struct DxvkGazeVrs::Worker
 +  {
++    static_assert(DxvkGazeVrs::MaxTargets == DxvkGazeSource::MaxSlots);
++
++    struct PassInfo
++    {
++      uint32_t width = 0u, height = 0u, layers = 0u, format = 0u,
++               samples = 0u, coarse = 0u, mid = 0u;
++    };
++
 +    // Published by the worker, copied by the render thread with a try-lock.
 +    dxvk::mutex configMutex;
 +    GazeConfig config;
@@ -1158,33 +1266,70 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +
 +    // Written by the render thread, reported in the status file.
 +    std::atomic<uint32_t> candidates = {0u}, attached = {0u}, uploads = {0u};
-+    std::atomic<uint32_t> width = {0u}, height = {0u}, layers = {0u}, format = {0u},
-+        samples = {0u}, coarse = {0u}, mid = {0u};
++    dxvk::mutex statusMutex;
++    PassInfo windowPass = {};
++    PassInfo lastPass = {};
++    std::atomic<uint64_t> windowBestScore = {0u};
 +    VkExtent2D texel = {};
 +
 +    // Worker thread only from here on.
 +    GazeConfigFile file;
 +    DxvkGazeSource source;
 +    std::string statusPath;
++    std::string ownerTag;
 +    uint32_t statusTick = 0u;
 +    std::chrono::steady_clock::time_point nextPoll = {}, nextStatus = {};
++    std::array<uint32_t, MaxTargets> lastTouchSeq = {};
++    std::array<std::chrono::steady_clock::time_point, MaxTargets> lastActiveTime = {};
 +
 +    struct Generator
 +    {
 +      Worker *worker;
-+      bool operator()(const GazeMapRequest &pass, GazeMap &result) const
++      bool operator()(size_t slot, bool firstInBatch, uint32_t touchSeq,
++          const GazeMapRequest &pass, GazeMap &result) const
 +      {
-+        worker->tick();
-+        return worker->source.generate(pass, result);
++        if (firstInBatch)
++        {
++          worker->tick();
++          worker->source.beginBatch();
++        }
++        bool active = true;
++        if (slot < MaxTargets && pass.shape[0] && pass.shape[1])
++        {
++          const auto now = std::chrono::steady_clock::now();
++          if (touchSeq != worker->lastTouchSeq[slot]
++              || worker->lastActiveTime[slot].time_since_epoch().count() == 0)
++          {
++            worker->lastTouchSeq[slot] = touchSeq;
++            worker->lastActiveTime[slot] = now;
++          }
++          else if (now - worker->lastActiveTime[slot] > std::chrono::seconds(2))
++          {
++            active = false;
++          }
++        }
++        return worker->source.generateSlot(slot, pass, result, active);
 +      }
 +    };
 +    // Last member: its thread starts in the constructor and uses the rest.
-+    GazeMapWorker<dxvk::thread, dxvk::mutex, dxvk::condition_variable, Generator> maps;
++    GazeMapWorker<dxvk::thread, dxvk::mutex, dxvk::condition_variable, Generator, MaxTargets> maps;
++
++    static std::string makeOwnerTag()
++    {
++      static std::atomic<uint32_t> s_workerId = {0u};
++#ifdef _WIN32
++      const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
++#else
++      const unsigned long pid = static_cast<unsigned long>(getpid());
++#endif
++      return str::format(pid, ".", ++s_workerId);
++    }
 +
 +    Worker(GazeConfigFile configFile, VkExtent2D texelSize)
 +    : config(configFile.config()), texel(texelSize), file(std::move(configFile)),
 +      source(gazePath("DXVK_GAZE_FILE", "Z:\\dev\\shm\\vrchat_dfr_gaze"), config),
 +      statusPath(file.path().empty() ? std::string() : file.path() + ".status"),
++      ownerTag(makeOwnerTag()),
 +      maps([] { env::setThreadName("dxvk-gaze-map"); },
 +        Generator{this}, std::chrono::milliseconds(4)) { }
 +
@@ -1216,28 +1361,113 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      }
 +    }
 +
++    // Multiple DXVK devices or helper processes may share DXVK_GAZE_CONFIG.
++    // An instance with zero candidate passes skips writing when another
++    // instance updated the status file within the last 2.5 seconds.
++    bool shouldWriteStatus(uint32_t candidatesNow) const
++    {
++      if (candidatesNow > 0u)
++        return true;
++
++      bool fresh = false;
++#ifdef _WIN32
++      WIN32_FILE_ATTRIBUTE_DATA attr = {};
++      if (!GetFileAttributesExA(statusPath.c_str(), GetFileExInfoStandard, &attr))
++        return true;
++      FILETIME nowFt = {};
++      GetSystemTimeAsFileTime(&nowFt);
++      const uint64_t fileTime = (uint64_t(attr.ftLastWriteTime.dwHighDateTime) << 32u)
++          | attr.ftLastWriteTime.dwLowDateTime;
++      const uint64_t nowTime = (uint64_t(nowFt.dwHighDateTime) << 32u)
++          | nowFt.dwLowDateTime;
++      const uint64_t age = nowTime >= fileTime ? nowTime - fileTime : 0ull;
++      const uint64_t ahead = fileTime > nowTime ? fileTime - nowTime : 0ull;
++      fresh = age < 25000000ull && ahead < 50000000ull; // 2.5 s behind to 5 s ahead, in 100 ns units
++#else
++      struct stat st = {};
++      if (stat(statusPath.c_str(), &st) != 0)
++        return true;
++      const auto nowSec = std::time(nullptr);
++      fresh = (nowSec >= st.st_mtime ? nowSec - st.st_mtime < 3 : st.st_mtime - nowSec < 5);
++#endif
++      if (!fresh)
++        return true;
++
++      std::FILE *in = std::fopen(statusPath.c_str(), "rb");
++      if (!in)
++        return true;
++      char line[128] = {};
++      const bool gotLine = std::fgets(line, sizeof(line), in) != nullptr;
++      std::fclose(in);
++      if (!gotLine)
++        return true;
++
++      const std::string header(line);
++      const size_t pos = header.find("owner=");
++      if (pos == std::string::npos)
++        return true;
++      const size_t end = header.find_first_of(" \r\n\t", pos);
++      const std::string current = header.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
++      return current == ("owner=" + ownerTag);
++    }
++
 +    // One small file a second so "is it actually foveating?" can be answered
 +    // from the host without a Proton log.
 +    void writeStatus()
 +    {
 +      static const char *const states[] = {"none", "live", "held", "fallback", "fake"};
-+      const uint32_t code = coarse.load(), midCode = mid.load();
++      const uint32_t candidatesNow = candidates.exchange(0u, std::memory_order_relaxed);
++      const uint32_t attachedNow = attached.exchange(0u, std::memory_order_relaxed);
++      const uint32_t uploadsNow = uploads.exchange(0u, std::memory_order_relaxed);
++
++      PassInfo pass = {};
++      {
++        std::lock_guard<dxvk::mutex> lock(statusMutex);
++        if (windowBestScore.exchange(0u, std::memory_order_relaxed) != 0u)
++          lastPass = windowPass;
++        pass = lastPass;
++      }
++
++      if (!shouldWriteStatus(candidatesNow))
++        return;
++
 +      char text[512];
 +      const int length = std::snprintf(text, sizeof(text),
-+          "tick=%u\nenabled=%d\ngaze=%s\nsource=%s\ncandidate_passes_per_s=%u\n"
++          "tick=%u owner=%s\nenabled=%d\ngaze=%s\nsource=%s\ncandidate_passes_per_s=%u\n"
 +          "foveated_passes_per_s=%u\nmap_uploads_per_s=%u\npass=%ux%u layers=%u fmt=%u samples=%u\n"
 +          "coarse=%ux%u\nmid=%ux%u\ntexel=%ux%u\n",
-+          ++statusTick, int(file.config().enabled), states[uint32_t(source.state())],
-+          source.sourceOpen() ? "open" : "closed", candidates.exchange(0u), attached.exchange(0u),
-+          uploads.exchange(0u), width.load(), height.load(), layers.load(), format.load(),
-+          samples.load(), 1u << (code >> 2u), 1u << (code & 3u),
-+          1u << (midCode >> 2u), 1u << (midCode & 3u), texel.width, texel.height);
++          ++statusTick, ownerTag.c_str(), int(file.config().enabled), states[uint32_t(source.state())],
++          source.sourceOpen() ? "open" : "closed", candidatesNow, attachedNow, uploadsNow,
++          pass.width, pass.height, pass.layers, pass.format, pass.samples,
++          1u << (pass.coarse >> 2u), 1u << (pass.coarse & 3u),
++          1u << (pass.mid >> 2u), 1u << (pass.mid & 3u), texel.width, texel.height);
 +      if (length <= 0)
 +        return;
-+      if (std::FILE *out = std::fopen(statusPath.c_str(), "wb"))
++
++      const std::string tempPath = statusPath + ".tmp." + ownerTag;
++      if (std::FILE *out = std::fopen(tempPath.c_str(), "wb"))
 +      {
-+        std::fwrite(text, 1u, std::min(size_t(length), sizeof(text) - 1u), out);
-+        std::fclose(out);
++        const size_t want = std::min(size_t(length), sizeof(text) - 1u);
++        const bool written = std::fwrite(text, 1u, want, out) == want;
++        const bool closed = std::fclose(out) == 0;
++        if (written && closed)
++        {
++#ifdef _WIN32
++          if (!MoveFileExA(tempPath.c_str(), statusPath.c_str(), MOVEFILE_REPLACE_EXISTING))
++            DeleteFileA(tempPath.c_str());
++#else
++          if (std::rename(tempPath.c_str(), statusPath.c_str()) != 0)
++            std::remove(tempPath.c_str());
++#endif
++        }
++        else
++        {
++#ifdef _WIN32
++          DeleteFileA(tempPath.c_str());
++#else
++          std::remove(tempPath.c_str());
++#endif
++        }
 +      }
 +    }
 +  };
@@ -1298,7 +1528,7 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      m_mapWorker = std::make_unique<Worker>(std::move(file), m_texel);
 +      // Start the worker's poll loop now, so the config file is watched even
 +      // before (or without) a pass that qualifies for VRS.
-+      m_mapWorker->maps.exchange(GazeMapRequest(), true, m_cpuMap);
++      m_mapWorker->maps.exchange(GazeMapRequest(), true, m_targets[0].cpuMap, 0u);
 +    }
 +
 +    Logger::info(str::format("GazeVRS: init ", m_ok ? "ok" : "FAILED",
@@ -1323,11 +1553,110 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +    if (bufferMem) vk->vkFreeMemory(vk->device(), bufferMem, nullptr);
 +  }
 +
-+  bool DxvkGazeVrs::createResources()
++  bool DxvkGazeVrs::createTargetSlots(Target &target)
 +  {
 +    auto vk = m_device->vkd();
 +    const auto &memProps = m_device->adapter()->memoryProperties();
 +
++    auto findType = [&](uint32_t bits, VkMemoryPropertyFlags flags) -> int32_t
++    {
++      for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
++      {
++        if ((bits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & flags) == flags)
++          return int32_t(i);
++      }
++      return -1;
++    };
++
++    for (auto &slot : target.slots)
++    {
++      slot = new Slot(m_device);
++      VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
++      imageInfo.imageType = VK_IMAGE_TYPE_2D;
++      imageInfo.format = VK_FORMAT_R8_UINT;
++      imageInfo.extent = {m_maxTiles.width, m_maxTiles.height, 1u};
++      imageInfo.mipLevels = 1u;
++      imageInfo.arrayLayers = m_layers;
++      imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
++      imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
++      imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++      imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++      imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
++
++      if (vk->vkCreateImage(vk->device(), &imageInfo, nullptr, &slot->image))
++      {
++        target.slots = {};
++        return false;
++      }
++
++      VkMemoryRequirements req = {};
++      vk->vkGetImageMemoryRequirements(vk->device(), slot->image, &req);
++
++      int32_t type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++      if (type < 0)
++      {
++        target.slots = {};
++        return false;
++      }
++
++      VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
++      allocInfo.allocationSize = req.size;
++      allocInfo.memoryTypeIndex = uint32_t(type);
++
++      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->imageMem) || vk->vkBindImageMemory(vk->device(), slot->image, slot->imageMem, 0))
++      {
++        target.slots = {};
++        return false;
++      }
++
++      VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
++      viewInfo.image = slot->image;
++      viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
++      viewInfo.format = VK_FORMAT_R8_UINT;
++      viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
++
++      if (vk->vkCreateImageView(vk->device(), &viewInfo, nullptr, &slot->view))
++      {
++        target.slots = {};
++        return false;
++      }
++
++      VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
++      // Each layer starts at a four-byte aligned offset in the upload buffer.
++      const VkDeviceSize layerStride = (VkDeviceSize(m_maxTiles.width) * m_maxTiles.height + 3u) & ~VkDeviceSize(3u);
++      bufferInfo.size = layerStride * m_layers;
++      bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
++      bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++
++      if (vk->vkCreateBuffer(vk->device(), &bufferInfo, nullptr, &slot->buffer))
++      {
++        target.slots = {};
++        return false;
++      }
++
++      vk->vkGetBufferMemoryRequirements(vk->device(), slot->buffer, &req);
++      type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
++      if (type < 0)
++      {
++        target.slots = {};
++        return false;
++      }
++
++      allocInfo.allocationSize = req.size;
++      allocInfo.memoryTypeIndex = uint32_t(type);
++
++      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->bufferMem) || vk->vkBindBufferMemory(vk->device(), slot->buffer, slot->bufferMem, 0))
++      {
++        target.slots = {};
++        return false;
++      }
++    }
++
++    return true;
++  }
++
++  bool DxvkGazeVrs::createResources()
++  {
 +    const auto &fsrProps = m_device->properties().khrFragmentShadingRate;
 +
 +    if (!(m_device->getFormatFeatures(VK_FORMAT_R8_UINT).optimal
@@ -1348,80 +1677,38 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +    m_maxTiles.width = std::min(maxImageSize, std::max(512u, (8192u + m_texel.width - 1u) / m_texel.width));
 +    m_maxTiles.height = std::min(maxImageSize, std::max(512u, (8192u + m_texel.height - 1u) / m_texel.height));
 +
-+    auto findType = [&](uint32_t bits, VkMemoryPropertyFlags flags) -> int32_t
++    return createTargetSlots(m_targets[0]);
++  }
++
++  size_t DxvkGazeVrs::selectTarget(const TargetKey &key)
++  {
++    for (size_t i = 0u; i < MaxTargets; ++i)
 +    {
-+      for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
-+      {
-+        if ((bits & (1u << i)) && (memProps.memoryTypes[i].propertyFlags & flags) == flags)
-+          return int32_t(i);
-+      }
-+      return -1;
-+    };
-+
-+    for (auto &slot : m_slots)
-+    {
-+      slot = new Slot(m_device);
-+      VkImageCreateInfo imageInfo = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-+      imageInfo.imageType = VK_IMAGE_TYPE_2D;
-+      imageInfo.format = VK_FORMAT_R8_UINT;
-+      imageInfo.extent = {m_maxTiles.width, m_maxTiles.height, 1u};
-+      imageInfo.mipLevels = 1u;
-+      imageInfo.arrayLayers = m_layers;
-+      imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-+      imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-+      imageInfo.usage = VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-+      imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-+      imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-+
-+      if (vk->vkCreateImage(vk->device(), &imageInfo, nullptr, &slot->image))
-+        return false;
-+
-+      VkMemoryRequirements req = {};
-+      vk->vkGetImageMemoryRequirements(vk->device(), slot->image, &req);
-+
-+      int32_t type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-+      if (type < 0)
-+        return false;
-+
-+      VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-+      allocInfo.allocationSize = req.size;
-+      allocInfo.memoryTypeIndex = uint32_t(type);
-+
-+      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->imageMem) || vk->vkBindImageMemory(vk->device(), slot->image, slot->imageMem, 0))
-+        return false;
-+
-+      VkImageViewCreateInfo viewInfo = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-+      viewInfo.image = slot->image;
-+      viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-+      viewInfo.format = VK_FORMAT_R8_UINT;
-+      viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
-+
-+      if (vk->vkCreateImageView(vk->device(), &viewInfo, nullptr, &slot->view))
-+        return false;
-+
-+      VkBufferCreateInfo bufferInfo = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-+      // Each layer starts at a four-byte aligned offset in the upload buffer.
-+      const VkDeviceSize layerStride = (VkDeviceSize(m_maxTiles.width) * m_maxTiles.height + 3u) & ~VkDeviceSize(3u);
-+      bufferInfo.size = layerStride * m_layers;
-+      bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-+      bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-+
-+      if (vk->vkCreateBuffer(vk->device(), &bufferInfo, nullptr, &slot->buffer))
-+        return false;
-+
-+      vk->vkGetBufferMemoryRequirements(vk->device(), slot->buffer, &req);
-+      type = findType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-+      if (type < 0)
-+        return false;
-+
-+      allocInfo.allocationSize = req.size;
-+      allocInfo.memoryTypeIndex = uint32_t(type);
-+
-+      if (vk->vkAllocateMemory(vk->device(), &allocInfo, nullptr, &slot->bufferMem) || vk->vkBindBufferMemory(vk->device(), slot->buffer, slot->bufferMem, 0))
-+        return false;
++      if (m_targets[i].inUse && m_targets[i].key == key)
++        return i;
 +    }
 +
-+    return true;
++    for (size_t i = 0u; i < MaxTargets; ++i)
++    {
++      if (!m_targets[i].inUse)
++      {
++        if (!m_targets[i].slots[0] && !createTargetSlots(m_targets[i]))
++          break;
++        m_targets[i].inUse = true;
++        m_targets[i].key = key;
++        return i;
++      }
++    }
++
++    size_t lru = 0u;
++    for (size_t i = 1u; i < MaxTargets; ++i)
++    {
++      if (m_targets[i].slots[0] && m_targets[i].lastUsePass < m_targets[lru].lastUsePass)
++        lru = i;
++    }
++    m_targets[lru].inUse = true;
++    m_targets[lru].key = key;
++    return lru;
 +  }
 +
 +  void DxvkGazeVrs::refreshConfig()
@@ -1618,14 +1905,19 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      return false;
 +
 +    const float eyeW = sbs ? float(extent.width) * 0.5f : float(extent.width);
++    // The R8_UINT attachment depends only on dimensions, layers and resolved
++    // shading rates, not on color format or MSAA sample count.
 +    const std::array<uint32_t, 5> shape = {
-+        extent.width, extent.height, usedLayers, uint32_t(colorFormat), uint32_t(samples)};
++        extent.width, extent.height, usedLayers, 0u, 0u};
++    const size_t targetIndex = selectTarget({extent.width, extent.height, usedLayers, coarse, mid});
++    auto &target = m_targets[targetIndex];
++    target.lastUsePass = ++m_passSerial;
 +
 +    // Publish only a completed upload. This barrier precedes any new upload,
 +    // so rendering with the front image never depends on the back upload.
 +    const std::array<uint64_t, 2> completed = {
-+        m_slots[0]->completion->value(), m_slots[1]->completion->value()};
-+    if (m_buffers.promote(completed))
++        target.slots[0]->completion->value(), target.slots[1]->completion->value()};
++    if (target.buffers.promote(completed))
 +    {
 +      VkImageMemoryBarrier2 ready = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
 +      ready.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
@@ -1634,7 +1926,7 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      ready.dstAccessMask = VK_ACCESS_2_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT_KHR;
 +      ready.oldLayout = ready.newLayout = VK_IMAGE_LAYOUT_GENERAL;
 +      ready.srcQueueFamilyIndex = ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-+      ready.image = m_slots[m_buffers.active]->image;
++      ready.image = target.slots[target.buffers.active]->image;
 +      ready.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
 +      VkDependencyInfo dep = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
 +      dep.imageMemoryBarrierCount = 1u;
@@ -1661,26 +1953,26 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      }
 +      return false;
 +    }
-+    m_mapWorker->maps.exchange(request, true, m_cpuMap);
-+    const int32_t back = m_buffers.writable(completed);
++    m_mapWorker->maps.exchange(request, true, target.cpuMap, targetIndex);
++    const int32_t back = target.buffers.writable(completed);
 +    // A completed map can lag behind gaze, but must match this render target.
 +    // Do not upload a map already displayed or already pending on the GPU.
 +    auto matches = [&](const Rc<Slot> &slot) {
-+      return slot->filled && slot->request.sameMap(m_cpuMap->request);
++      return slot->filled && slot->request.sameMap(target.cpuMap->request);
 +    };
-+    const bool upload = back >= 0 && m_cpuMap && m_cpuMap->valid
-+        && m_cpuMap->request.shape == shape && m_cpuMap->request.coarse == coarse
-+        && m_cpuMap->request.mid == mid
-+        && (m_buffers.active < 0 || !matches(m_slots[m_buffers.active]));
++    const bool upload = back >= 0 && target.cpuMap && target.cpuMap->valid
++        && target.cpuMap->request.shape == shape && target.cpuMap->request.coarse == coarse
++        && target.cpuMap->request.mid == mid
++        && (target.buffers.active < 0 || !matches(target.slots[target.buffers.active]));
 +
 +    VkImageSubresourceRange allLayers = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, m_layers};
 +
 +    if (upload)
 +    {
-+      auto &slot = m_slots[back];
++      auto &slot = target.slots[back];
 +      const uint32_t layerStride = (tilesX * tilesY + 3u) & ~3u;
-+      const auto &data = m_cpuMap->data;
-+      const auto &mapRequest = m_cpuMap->request;
++      const auto &data = target.cpuMap->data;
++      const auto &mapRequest = target.cpuMap->request;
 +
 +      // Previous uses of this slot have completed on the GPU. No broad
 +      // graphics-to-transfer dependency is needed for a free back slot.
@@ -1746,30 +2038,36 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +      slot->request = mapRequest;
 +      m_mapWorker->uploads.fetch_add(1u, std::memory_order_relaxed);
 +      cmd->track(slot);
-+      cmd->queueSignal(slot->completion, m_buffers.upload(back));
++      cmd->queueSignal(slot->completion, target.buffers.upload(back));
 +    }
 +
 +    // During startup or a render-target change, use full-rate rendering until
 +    // a compatible attachment is ready rather than waiting for an upload.
-+    if (!m_cpuMap || !m_cpuMap->valid || m_buffers.active < 0
-+        || !m_slots[m_buffers.active]->filled
-+        || m_slots[m_buffers.active]->request.shape != shape
-+        || m_slots[m_buffers.active]->request.coarse != coarse
-+        || m_slots[m_buffers.active]->request.mid != mid)
++    if (!target.cpuMap || !target.cpuMap->valid || target.buffers.active < 0
++        || !target.slots[target.buffers.active]->filled
++        || target.slots[target.buffers.active]->request.shape != shape
++        || target.slots[target.buffers.active]->request.coarse != coarse
++        || target.slots[target.buffers.active]->request.mid != mid)
 +      return false;
 +
-+    auto &front = m_slots[m_buffers.active];
++    auto &front = target.slots[target.buffers.active];
 +    cmd->track(front);
-+    cmd->queueSignal(front->completion, m_buffers.read());
++    cmd->queueSignal(front->completion, target.buffers.read());
 +
 +    m_mapWorker->attached.fetch_add(1u, std::memory_order_relaxed);
-+    m_mapWorker->width.store(extent.width, std::memory_order_relaxed);
-+    m_mapWorker->height.store(extent.height, std::memory_order_relaxed);
-+    m_mapWorker->layers.store(layers, std::memory_order_relaxed);
-+    m_mapWorker->format.store(uint32_t(colorFormat), std::memory_order_relaxed);
-+    m_mapWorker->samples.store(uint32_t(samples), std::memory_order_relaxed);
-+    m_mapWorker->coarse.store(coarse, std::memory_order_relaxed);
-+    m_mapWorker->mid.store(mid, std::memory_order_relaxed);
++    const uint64_t score = (uint64_t(extent.width) * extent.height << 8u)
++        | std::min<uint64_t>(uint64_t(samples), 255u);
++    if (score > m_mapWorker->windowBestScore.load(std::memory_order_relaxed))
++    {
++      std::unique_lock<dxvk::mutex> lock(m_mapWorker->statusMutex, std::try_to_lock);
++      if (lock.owns_lock() && score > m_mapWorker->windowBestScore.load(std::memory_order_relaxed))
++      {
++        m_mapWorker->windowPass = {
++            extent.width, extent.height, layers, uint32_t(colorFormat),
++            uint32_t(samples), coarse, mid};
++        m_mapWorker->windowBestScore.store(score, std::memory_order_relaxed);
++      }
++    }
 +
 +    const bool grid = cfg.fake == GazeFake::Grid;
 +    // Debug overlay (sbs only): colored squares drawn at the end of the pass.
@@ -1829,10 +2127,10 @@ index 0000000000000000000000000000000000000000..1b0807c23d6f6e06669c50eaaf1b5d96
 +}
 diff --git a/src/dxvk/dxvk_gaze_vrs.h b/src/dxvk/dxvk_gaze_vrs.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..b48f14ae2c59fa1d85bb8ada8ce39eb11dd87dc6
+index 0000000000000000000000000000000000000000..5b283cb1dc861b1e5d0d7ea475e6ec8477719c19
 --- /dev/null
 +++ b/src/dxvk/dxvk_gaze_vrs.h
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,126 @@
 +#pragma once
 +
 +#include "dxvk_gaze_buffer.h"
@@ -1872,6 +2170,7 @@ index 0000000000000000000000000000000000000000..b48f14ae2c59fa1d85bb8ada8ce39eb1
 +
 +  private:
 +    static constexpr uint32_t MaxLayers = 2u;
++    static constexpr size_t MaxTargets = 8u;
 +
 +    DxvkDevice *m_device = nullptr;
 +
@@ -1893,12 +2192,33 @@ index 0000000000000000000000000000000000000000..b48f14ae2c59fa1d85bb8ada8ce39eb1
 +      bool filled = false;
 +      GazeMapRequest request;
 +    };
-+    std::array<Rc<Slot>, 2> m_slots;
-+    GazeVrsBufferState m_buffers;
++
++    // Passes with the same dimensions, layer count and resolved shading rates
++    // share one double-buffered attachment. Distinct passes use separate
++    // entries so they do not evict each other within a frame.
++    struct TargetKey
++    {
++      uint32_t width = 0u, height = 0u, layers = 0u, coarse = 0u, mid = 0u;
++      bool operator==(const TargetKey &o) const
++      {
++        return width == o.width && height == o.height && layers == o.layers
++            && coarse == o.coarse && mid == o.mid;
++      }
++    };
++    struct Target
++    {
++      bool inUse = false;
++      TargetKey key;
++      uint64_t lastUsePass = 0u;
++      std::array<Rc<Slot>, 2> slots;
++      GazeVrsBufferState buffers;
++      std::unique_ptr<GazeMap> cpuMap;
++    };
++    std::array<Target, MaxTargets> m_targets;
++    uint64_t m_passSerial = 0u;
 +    bool m_ok = false;
 +    struct Worker;
 +    std::unique_ptr<Worker> m_mapWorker;
-+    std::unique_ptr<GazeMap> m_cpuMap;
 +    bool m_loggedWorkerFailure = false;
 +
 +    VkExtent2D m_texel = {16u, 16u};
@@ -1932,6 +2252,8 @@ index 0000000000000000000000000000000000000000..b48f14ae2c59fa1d85bb8ada8ce39eb1
 +    std::chrono::steady_clock::time_point m_nextSummary = {};
 +
 +    bool createResources();
++    bool createTargetSlots(Target &target);
++    size_t selectTarget(const TargetKey &key);
 +  };
 +
 +}

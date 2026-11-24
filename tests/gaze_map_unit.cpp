@@ -233,6 +233,61 @@ int main()
     assert(result->request.dotCenter[0] == 8);
   }
   {
+    // Distinct pass shapes in one frame use separate worker channels, and
+    // tracking loss and recovery reach every channel.
+    struct MultiPollGenerator
+    {
+      std::atomic<int> *sample;
+      std::atomic<int> *batches;
+      int last[2] = {-2, -2};
+      bool operator()(size_t slot, bool firstInBatch, uint32_t, const GazeMapRequest &pass, GazeMap &result)
+      {
+        if (firstInBatch) batches->fetch_add(1);
+        const int current = sample->load();
+        if (current == last[slot]) return false;
+        last[slot] = current;
+        result.request = pass;
+        result.valid = current >= 0;
+        if (result.valid)
+        {
+          auto r = pass;
+          r.center[0] = current;
+          r.dotCenter[0] = current * 8;
+          generateGazeMap(r, result);
+        }
+        return true;
+      }
+    };
+    std::atomic<int> sample = {2}, batches = {0};
+    GazeMapWorker<std::thread,std::mutex,std::condition_variable,MultiPollGenerator,4>
+        worker({}, MultiPollGenerator{&sample, &batches}, 2ms);
+    auto reqA = request();
+    reqA.shape = {160u, 80u, 1u, 0u, 0u};
+    auto reqB = request();
+    reqB.shape = {120u, 60u, 1u, 0u, 0u};
+    std::unique_ptr<GazeMap> resA, resB;
+    until([&] {
+      worker.exchange(reqA, true, resA, 0u);
+      worker.exchange(reqB, true, resB, 1u);
+      return resA && resA->valid && resA->request.shape == reqA.shape && resA->request.center[0] == 2
+          && resB && resB->valid && resB->request.shape == reqB.shape && resB->request.center[0] == 2;
+    });
+    sample.store(-1);
+    until([&] {
+      worker.exchange(reqA, true, resA, 0u);
+      worker.exchange(reqB, true, resB, 1u);
+      return resA && !resA->valid && resB && !resB->valid;
+    });
+    sample.store(4);
+    until([&] {
+      worker.exchange(reqA, true, resA, 0u);
+      worker.exchange(reqB, true, resB, 1u);
+      return resA && resA->valid && resA->request.shape == reqA.shape && resA->request.center[0] == 4
+          && resB && resB->valid && resB->request.shape == reqB.shape && resB->request.center[0] == 4;
+    });
+    assert(batches.load() > 0);
+  }
+  {
     struct ThrowGenerator {bool operator()(const GazeMapRequest &,GazeMap &) const {throw std::runtime_error("test");}};
     GazeMapWorker<std::thread,std::mutex,std::condition_variable,ThrowGenerator> worker;
     until([&] {worker.exchange(request(),true,result);return worker.failed();});

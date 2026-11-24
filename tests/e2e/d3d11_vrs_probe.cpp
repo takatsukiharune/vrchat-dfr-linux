@@ -39,7 +39,9 @@ int main(int argc, char** argv) {
   const double seconds = std::atof(argv[3]);
   const std::string output = argv[4];
   const UINT samples = argc > 5 ? std::atoi(argv[5]) : 1;
-  const bool bench = argc > 6 && std::string(argv[6]) == "bench";
+  const std::string mode = argc > 6 ? argv[6] : "";
+  const bool bench = mode == "bench";
+  const bool multipass = mode == "multipass";
 
   ID3D11Device* device = nullptr;
   ID3D11DeviceContext* context = nullptr;
@@ -62,6 +64,38 @@ int main(int argc, char** argv) {
   ID3D11RenderTargetView* rtv = nullptr;
   CHECK(device->CreateRenderTargetView(target, nullptr, &rtv));
 
+  // In multipass mode, render two more candidate passes per frame: a 1x
+  // full-size pass and a 1x 1536x768 pass. A second D3D11 device also draws
+  // a 256x256 non-candidate pass.
+  ID3D11RenderTargetView *postRtv = nullptr, *smallRtv = nullptr;
+  ID3D11Device* auxDevice = nullptr;
+  ID3D11DeviceContext* auxContext = nullptr;
+  ID3D11RenderTargetView* auxRtv = nullptr;
+  ID3D11VertexShader* auxVs = nullptr;
+  ID3D11PixelShader* auxPs = nullptr;
+  const UINT smallW = 1536, smallH = 768;
+  if (multipass) {
+    CHECK(device->CreateRenderTargetView(resolved, nullptr, &postRtv));
+    D3D11_TEXTURE2D_DESC smallDesc = {};
+    smallDesc.Width = smallW; smallDesc.Height = smallH; smallDesc.MipLevels = 1; smallDesc.ArraySize = 1;
+    smallDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    smallDesc.SampleDesc.Count = 1;
+    smallDesc.Usage = D3D11_USAGE_DEFAULT;
+    smallDesc.BindFlags = D3D11_BIND_RENDER_TARGET;
+    ID3D11Texture2D* smallTex = nullptr;
+    CHECK(device->CreateTexture2D(&smallDesc, nullptr, &smallTex));
+    CHECK(device->CreateRenderTargetView(smallTex, nullptr, &smallRtv));
+
+    CHECK(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &level, 1,
+      D3D11_SDK_VERSION, &auxDevice, nullptr, &auxContext));
+    D3D11_TEXTURE2D_DESC auxDesc = smallDesc;
+    auxDesc.Width = 256; auxDesc.Height = 256;
+    auxDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ID3D11Texture2D* auxTex = nullptr;
+    CHECK(auxDevice->CreateTexture2D(&auxDesc, nullptr, &auxTex));
+    CHECK(auxDevice->CreateRenderTargetView(auxTex, nullptr, &auxRtv));
+  }
+
   ID3DBlob *vsBlob = nullptr, *psBlob = nullptr, *errors = nullptr;
   if (FAILED(D3DCompile(shader, strlen(shader), "probe", nullptr, nullptr, "vs", "vs_5_0", 0, 0, &vsBlob, &errors))
    || FAILED(D3DCompile(shader, strlen(shader), "probe", nullptr, nullptr, bench ? "ps_bench" : "ps", "ps_5_0", 0, 0, &psBlob, &errors))) {
@@ -72,6 +106,10 @@ int main(int argc, char** argv) {
   ID3D11PixelShader* ps = nullptr;
   CHECK(device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs));
   CHECK(device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps));
+  if (multipass) {
+    CHECK(auxDevice->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &auxVs));
+    CHECK(auxDevice->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &auxPs));
+  }
 
   const D3D11_VIEWPORT viewport = {0, 0, float(width), float(height), 0, 1};
   const float clear[4] = {0, 0, 0, 1};
@@ -122,6 +160,31 @@ int main(int argc, char** argv) {
     context->ClearRenderTargetView(rtv, clear);
     context->Draw(3, 0);
     context->OMSetRenderTargets(0, nullptr, nullptr);
+    if (multipass) {
+      // Draw a 1x pass at the same size as the main pass.
+      context->OMSetRenderTargets(1, &postRtv, nullptr);
+      context->RSSetViewports(1, &viewport);
+      context->ClearRenderTargetView(postRtv, clear);
+      context->Draw(3, 0);
+      // Draw a smaller 1x side-by-side pass.
+      const D3D11_VIEWPORT smallVp = {0, 0, float(smallW), float(smallH), 0, 1};
+      context->OMSetRenderTargets(1, &smallRtv, nullptr);
+      context->RSSetViewports(1, &smallVp);
+      context->ClearRenderTargetView(smallRtv, clear);
+      context->Draw(3, 0);
+      context->OMSetRenderTargets(0, nullptr, nullptr);
+      // Draw a small non-candidate pass on a separate D3D11 device.
+      const D3D11_VIEWPORT auxVp = {0, 0, 256.0f, 256.0f, 0, 1};
+      auxContext->OMSetRenderTargets(1, &auxRtv, nullptr);
+      auxContext->RSSetViewports(1, &auxVp);
+      auxContext->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      auxContext->VSSetShader(auxVs, nullptr, 0);
+      auxContext->PSSetShader(auxPs, nullptr, 0);
+      auxContext->ClearRenderTargetView(auxRtv, clear);
+      auxContext->Draw(3, 0);
+      auxContext->OMSetRenderTargets(0, nullptr, nullptr);
+      auxContext->Flush();
+    }
     if (frame % 8) { context->Flush(); Sleep(5); continue; }
 
     if (samples > 1) {
